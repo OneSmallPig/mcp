@@ -12,6 +12,7 @@ import com.example.mcp.client.sse.EventSources;
 import com.google.gson.Gson;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
 import okhttp3.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -22,6 +23,8 @@ import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.Map;
+import java.util.HashMap;
+import java.util.HashSet;
 
 /**
  * MCP SSE服务实现
@@ -53,7 +56,7 @@ public class McpSseServiceImpl implements McpSseService {
         // 使用长超时配置，因为SSE连接需要保持更长时间
         this.httpClient = new OkHttpClient.Builder()
                 .connectTimeout(config.getTimeout(), TimeUnit.SECONDS)
-                .readTimeout(config.getTimeout() * 2, TimeUnit.SECONDS)
+                .readTimeout(config.getTimeout() * 2L, TimeUnit.SECONDS)
                 .writeTimeout(config.getTimeout(), TimeUnit.SECONDS)
                 .build();
         
@@ -114,8 +117,46 @@ public class McpSseServiceImpl implements McpSseService {
                         
                         @Override
                         public void onEvent(EventSource eventSource, String id, String type, String data) {
-                            // 这里不处理事件，只记录
-                            log.debug("初始连接收到未处理的SSE事件: type={}, id={}, data={}", type, id, data);
+                            // 不仅记录，还要解析可能包含客户端ID的事件
+                            log.debug("初始连接收到SSE事件: type={}, id={}, data={}", type, id, data);
+                            
+                            // 尝试从不同的事件类型和数据格式中提取客户端ID
+                            
+                            // 1. 检查事件类型
+                            if ("client_id".equals(type) || "id".equals(type)) {
+                                log.info("从事件类型中获取客户端ID: {}", data);
+                                clientId = data;
+                                return;
+                            }
+                            
+                            // 2. 尝试解析为JSON并检查客户端ID字段
+                            try {
+                                JsonObject jsonData = gson.fromJson(data, JsonObject.class);
+                                
+                                // 检查各种可能的客户端ID字段名
+                                String[] possibleFields = {"client_id", "clientId", "id", "connection_id", "connectionId"};
+                                for (String field : possibleFields) {
+                                    if (jsonData.has(field) && !jsonData.get(field).isJsonNull()) {
+                                        String extractedId = jsonData.get(field).getAsString();
+                                        log.info("从JSON数据中获取客户端ID({}): {}", field, extractedId);
+                                        clientId = extractedId;
+                                        return;
+                                    }
+                                }
+                            } catch (Exception e) {
+                                // 如果不是JSON格式，忽略错误
+                            }
+                            
+                            // 3. 检查格式如"client_id:xxxx"的纯文本数据
+                            if (data != null && data.contains("client_id:")) {
+                                String[] parts = data.split("client_id:");
+                                if (parts.length > 1) {
+                                    String extractedId = parts[1].trim();
+                                    log.info("从文本数据中获取客户端ID: {}", extractedId);
+                                    clientId = extractedId;
+                                    return;
+                                }
+                            }
                         }
                         
                         @Override
@@ -176,18 +217,44 @@ public class McpSseServiceImpl implements McpSseService {
         // 设置流式输出
         requestBody.addProperty("stream", true);
         
-        // 确定请求URL
-        String url;
-        if (config.isUseMcpProtocol()) {
-            // 使用MCP协议
-            url = getFullServerPath();
+        // 添加工具列表
+        List<Tool> tools = config.getTools();
+        if (tools != null && !tools.isEmpty()) {
+            log.info("添加{}个工具到请求中", tools.size());
             
-            // 添加服务器期望的参数
-            requestBody.addProperty("id", currentPromptId);
-        } else {
-            // 使用直接API调用
-            url = config.getEndpoint();
+            JsonArray toolsArray = new JsonArray();
+            for (Tool tool : tools) {
+                JsonObject toolObj = new JsonObject();
+                toolObj.addProperty("type", "function");
+                
+                JsonObject functionObj = new JsonObject();
+                functionObj.addProperty("name", tool.getName());
+                functionObj.addProperty("description", tool.getDescription());
+                
+                // 添加参数信息
+                if (tool.getParameters() != null && !tool.getParameters().isEmpty()) {
+                    JsonObject parametersObj = gson.toJsonTree(tool.getParameters()).getAsJsonObject();
+                    functionObj.add("parameters", parametersObj);
+                } else {
+                    // 如果没有参数，添加一个空对象作为参数
+                    JsonObject emptyParams = new JsonObject();
+                    emptyParams.addProperty("type", "object");
+                    emptyParams.add("properties", new JsonObject());
+                    functionObj.add("parameters", emptyParams);
+                }
+                
+                toolObj.add("function", functionObj);
+                toolsArray.add(toolObj);
+                
+                log.debug("添加工具: {}", tool.getName());
+            }
+            
+            requestBody.add("tools", toolsArray);
+            requestBody.addProperty("tool_choice", "auto");
         }
+        
+        // 确定请求URL
+        String url = config.getEndpoint();
         
         log.debug("发送SSE请求到: {}", url);
         log.debug("请求体: {}", requestBody);
@@ -229,6 +296,9 @@ public class McpSseServiceImpl implements McpSseService {
         private final StringBuilder contentBuilder = new StringBuilder();
         private boolean completed = false;
         
+        // 添加事件完整缓存
+        private final List<JsonObject> eventCache = new ArrayList<>();
+        
         public SseSourceListener(SseEventListener userListener) {
             this.userListener = userListener;
         }
@@ -247,6 +317,8 @@ public class McpSseServiceImpl implements McpSseService {
             
             if (data == null || data.trim().isEmpty() || "[DONE]".equals(data.trim())) {
                 log.debug("收到结束事件: {}", data);
+                // 处理所有缓存的事件
+                processAllEvents();
                 completeEvent();
                 return;
             }
@@ -256,19 +328,348 @@ public class McpSseServiceImpl implements McpSseService {
                 JsonObject jsonData = gson.fromJson(data, JsonObject.class);
                 
                 if (jsonData.has("choices") && !jsonData.get("choices").isJsonNull()) {
-                    JsonObject deltaObj = jsonData.getAsJsonArray("choices")
-                            .get(0).getAsJsonObject()
-                            .getAsJsonObject("delta");
+                    JsonObject choiceObj = jsonData.getAsJsonArray("choices")
+                            .get(0).getAsJsonObject();
                     
-                    if (deltaObj.has("content") && !deltaObj.get("content").isJsonNull()) {
-                        String content = deltaObj.get("content").getAsString();
-                        contentBuilder.append(content);
-                        userListener.onTextChunk(content);
+                    // 处理内容增量
+                    if (choiceObj.has("delta") && !choiceObj.get("delta").isJsonNull()) {
+                        JsonObject deltaObj = choiceObj.getAsJsonObject("delta");
+                        
+                        // 处理文本内容 - 文本内容可以直接发送，不需等待
+                        if (deltaObj.has("content") && !deltaObj.get("content").isJsonNull()) {
+                            String content = deltaObj.get("content").getAsString();
+                            contentBuilder.append(content);
+                            userListener.onTextChunk(content);
+                        }
+                        
+                        // 缓存包含工具调用的事件，不立即处理
+                        if (deltaObj.has("tool_calls") && !deltaObj.get("tool_calls").isJsonNull()) {
+                            // 将整个事件对象添加到缓存
+                            eventCache.add(jsonData);
+                        }
                     }
                 }
             } catch (Exception e) {
                 log.error("解析SSE事件数据时出错", e);
                 userListener.onError(e);
+            }
+        }
+        
+        /**
+         * 处理所有缓存的事件
+         */
+        private void processAllEvents() {
+            if (eventCache.isEmpty()) {
+                log.debug("没有缓存的工具调用事件需要处理");
+                return;
+            }
+            
+            log.info("开始处理{}个缓存的工具调用事件", eventCache.size());
+            
+            // 合并所有事件中的工具调用
+            Map<String, JsonObject> mergedToolCalls = new HashMap<>();
+            Map<Integer, String> indexToIdMap = new HashMap<>();
+            
+            // 第一步：收集和合并所有工具调用
+            for (JsonObject event : eventCache) {
+                try {
+                    if (event.has("choices") && !event.get("choices").isJsonNull()) {
+                        JsonObject choiceObj = event.getAsJsonArray("choices")
+                                .get(0).getAsJsonObject();
+                        
+                        if (choiceObj.has("delta") && !choiceObj.get("delta").isJsonNull()) {
+                            JsonObject deltaObj = choiceObj.getAsJsonObject("delta");
+                            
+                            if (deltaObj.has("tool_calls") && !deltaObj.get("tool_calls").isJsonNull()) {
+                                JsonArray toolCalls = deltaObj.getAsJsonArray("tool_calls");
+                                
+                                for (int i = 0; i < toolCalls.size(); i++) {
+                                    JsonObject toolCallObj = toolCalls.get(i).getAsJsonObject();
+                                    
+                                    // 获取工具调用ID
+                                    String toolCallId = "unknown";
+                                    Integer index = null;
+                                    
+                                    if (toolCallObj.has("id") && !toolCallObj.get("id").isJsonNull()) {
+                                        toolCallId = toolCallObj.get("id").getAsString();
+                                    }
+                                    
+                                    if (toolCallObj.has("index") && !toolCallObj.get("index").isJsonNull()) {
+                                        index = toolCallObj.get("index").getAsInt();
+                                        if (toolCallId.equals("unknown")) {
+                                            toolCallId = "index_" + index;
+                                        }
+                                    } else {
+                                        if (toolCallId.equals("unknown")) {
+                                            // 如果没有ID，使用索引作为ID
+                                            toolCallId = "tool_" + i;
+                                        }
+                                    }
+                                    
+                                    // 将index和id的关系保存起来
+                                    if (index != null) {
+                                        String existingId = indexToIdMap.get(index);
+                                        if (existingId != null && !existingId.equals(toolCallId) && 
+                                            !existingId.startsWith("index_") && !existingId.equals("unknown")) {
+                                            // 如果已有非索引生成的ID，则使用该ID
+                                            toolCallId = existingId;
+                                        } else {
+                                            indexToIdMap.put(index, toolCallId);
+                                        }
+                                    }
+                                    
+                                    // 从合并映射中获取现有对象或创建新对象
+                                    JsonObject mergedToolCall = mergedToolCalls.getOrDefault(toolCallId, new JsonObject());
+                                    
+                                    // 合并工具调用信息
+                                    mergeToolCallObjects(mergedToolCall, toolCallObj);
+                                    
+                                    // 更新合并映射
+                                    mergedToolCalls.put(toolCallId, mergedToolCall);
+                                    
+                                    // 处理可能存在的同index不同id的情况
+                                    if (index != null) {
+                                        String idFromIndex = "index_" + index;
+                                        if (!toolCallId.equals(idFromIndex) && mergedToolCalls.containsKey(idFromIndex)) {
+                                            // 合并同index不同id的工具调用数据
+                                            JsonObject indexBasedToolCall = mergedToolCalls.get(idFromIndex);
+                                            mergeToolCallObjects(mergedToolCall, indexBasedToolCall);
+                                            // 移除index为基础的key
+                                            mergedToolCalls.remove(idFromIndex);
+                                            // 更新索引到ID的映射
+                                            indexToIdMap.put(index, toolCallId);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } catch (Exception e) {
+                    log.error("合并工具调用事件时出错", e);
+                }
+            }
+            
+            log.info("合并后有{}个不同的工具调用", mergedToolCalls.size());
+            
+            // 第二步：处理合并后的工具调用
+            for (Map.Entry<String, JsonObject> entry : mergedToolCalls.entrySet()) {
+                String toolCallId = entry.getKey();
+                JsonObject mergedToolCall = entry.getValue();
+                
+                try {
+                    ToolCall toolCall = new ToolCall();
+                    toolCall.setId(toolCallId);
+                    
+                    // 提取函数信息
+                    if (mergedToolCall.has("function") && !mergedToolCall.get("function").isJsonNull()) {
+                        JsonObject functionObj = mergedToolCall.getAsJsonObject("function");
+                        
+                        // 设置函数名称
+                        if (functionObj.has("name") && !functionObj.get("name").isJsonNull()) {
+                            toolCall.setFunction(functionObj.get("name").getAsString());
+                        } else {
+                            log.warn("工具调用缺少函数名称: {}", toolCallId);
+                            continue; // 没有函数名称，跳过此工具调用
+                        }
+                        
+                        // 设置参数
+                        if (functionObj.has("arguments") && !functionObj.get("arguments").isJsonNull()) {
+                            JsonElement argumentsElem = functionObj.get("arguments");
+                            Map<String, Object> arguments = new HashMap<>();
+                            
+                            try {
+                                // 处理不同形式的参数
+                                if (argumentsElem.isJsonPrimitive()) {
+                                    // 是字符串，尝试解析
+                                    String argumentsJson = argumentsElem.getAsString();
+                                    if (argumentsJson != null && !argumentsJson.isEmpty()) {
+                                        arguments = gson.fromJson(argumentsJson, Map.class);
+                                    }
+                                } else if (argumentsElem.isJsonObject()) {
+                                    // 直接是JSON对象
+                                    arguments = gson.fromJson(argumentsElem, Map.class);
+                                }
+                                
+                                // 转换参数格式 - 处理嵌套结构
+                                arguments = McpSseServiceImpl.this.convertArguments(toolCall.getFunction(), arguments);
+                                
+                                toolCall.setArguments(arguments);
+                            } catch (Exception e) {
+                                log.error("解析工具调用参数失败: {}", e.getMessage());
+                                // 记录原始参数以便调试
+                                Map<String, Object> args = new HashMap<>();
+                                args.put("raw", argumentsElem.toString());
+                                toolCall.setArguments(args);
+                            }
+                        } else {
+                            // 没有参数，使用空Map
+                            toolCall.setArguments(new HashMap<>());
+                        }
+                        
+                        log.info("处理合并后的工具调用: {}({})", toolCall.getFunction(), 
+                                 toolCall.getArguments() != null ? gson.toJson(toolCall.getArguments()) : "无参数");
+                        
+                        // 通知监听器
+                        userListener.onToolCall(toolCall);
+                        
+                        // 执行工具并返回结果
+                        try {
+                            // 执行工具
+                            String result = executeToolCall(toolCall);
+                            
+                            // 通知监听器工具执行结果
+                            userListener.onToolResult(toolCall.getFunction(), result);
+                            
+                            // 发送结果给服务器
+                            sendToolResult(currentPromptId, toolCall.getId(), result);
+                        } catch (Exception e) {
+                            log.error("执行工具时出错", e);
+                            // 发送错误结果
+                            try {
+                                sendToolResult(currentPromptId, toolCall.getId(), 
+                                       "执行工具时出错: " + e.getMessage());
+                            } catch (Exception ex) {
+                                log.error("发送工具执行错误结果时出错", ex);
+                            }
+                        }
+                    } else {
+                        log.warn("工具调用缺少函数信息: {}", toolCallId);
+                    }
+                } catch (Exception e) {
+                    log.error("处理合并后的工具调用时出错: {}", e.getMessage());
+                }
+            }
+            
+            // 清空事件缓存
+            eventCache.clear();
+        }
+        
+        /**
+         * 合并工具调用对象
+         */
+        private void mergeToolCallObjects(JsonObject target, JsonObject source) {
+            // 合并ID
+            if (source.has("id") && !source.get("id").isJsonNull()) {
+                target.add("id", source.get("id"));
+            }
+            
+            // 合并索引
+            if (source.has("index") && !source.get("index").isJsonNull()) {
+                target.add("index", source.get("index"));
+            }
+            
+            // 合并类型
+            if (source.has("type") && !source.get("type").isJsonNull()) {
+                target.add("type", source.get("type"));
+            }
+            
+            // 合并函数信息
+            if (source.has("function") && !source.get("function").isJsonNull()) {
+                JsonObject sourceFunction = source.getAsJsonObject("function");
+                
+                if (!target.has("function") || target.get("function").isJsonNull()) {
+                    // 目标没有函数信息，直接添加
+                    target.add("function", sourceFunction.deepCopy());
+                } else {
+                    // 合并函数信息
+                    JsonObject targetFunction = target.getAsJsonObject("function");
+                    
+                    // 合并函数名称
+                    if (sourceFunction.has("name") && !sourceFunction.get("name").isJsonNull()) {
+                        targetFunction.add("name", sourceFunction.get("name"));
+                    }
+                    
+                    // 合并函数参数 - 特殊处理参数字符串的情况
+                    if (sourceFunction.has("arguments") && !sourceFunction.get("arguments").isJsonNull()) {
+                        JsonElement sourceArgs = sourceFunction.get("arguments");
+                        
+                        if (!targetFunction.has("arguments") || targetFunction.get("arguments").isJsonNull()) {
+                            // 如果目标没有参数，直接添加
+                            targetFunction.add("arguments", sourceArgs);
+                        } else {
+                            JsonElement targetArgs = targetFunction.get("arguments");
+                            
+                            // 如果两者都是字符串类型的参数
+                            if (targetArgs.isJsonPrimitive() && sourceArgs.isJsonPrimitive()) {
+                                // 将原始参数字符串和新参数字符串合并
+                                String combinedArgs = targetArgs.getAsString() + sourceArgs.getAsString();
+                                
+                                // 尝试解析合并后的字符串为有效JSON
+                                try {
+                                    // 检查是否是完整的JSON对象
+                                    if (combinedArgs.trim().startsWith("{") && combinedArgs.trim().endsWith("}")) {
+                                        // 尝试解析为JSON对象
+                                        JsonObject parsedArgs = gson.fromJson(combinedArgs, JsonObject.class);
+                                        targetFunction.add("arguments", parsedArgs);
+                                    } else {
+                                        // 不是完整JSON，保持字符串形式
+                                        targetFunction.addProperty("arguments", combinedArgs);
+                                    }
+                                } catch (Exception e) {
+                                    // 解析失败，保持字符串形式
+                                    targetFunction.addProperty("arguments", combinedArgs);
+                                }
+                            } else if (targetArgs.isJsonObject() && sourceArgs.isJsonObject()) {
+                                // 如果两者都是JSON对象，递归合并
+                                mergeJsonObjects(targetArgs.getAsJsonObject(), sourceArgs.getAsJsonObject());
+                            } else if (targetArgs.isJsonPrimitive() && sourceArgs.isJsonObject()) {
+                                // 目标是字符串，源是对象
+                                if (targetArgs.getAsString().isEmpty()) {
+                                    // 如果目标是空字符串，使用源对象
+                                    targetFunction.add("arguments", sourceArgs);
+                                } else {
+                                    // 尝试将目标字符串解析为JSON对象
+                                    try {
+                                        JsonObject parsedTargetArgs = gson.fromJson(targetArgs.getAsString(), JsonObject.class);
+                                        mergeJsonObjects(parsedTargetArgs, sourceArgs.getAsJsonObject());
+                                        targetFunction.add("arguments", parsedTargetArgs);
+                                    } catch (Exception e) {
+                                        // 解析失败，使用源对象
+                                        targetFunction.add("arguments", sourceArgs);
+                                    }
+                                }
+                            } else if (targetArgs.isJsonObject() && sourceArgs.isJsonPrimitive()) {
+                                // 目标是对象，源是字符串
+                                if (sourceArgs.getAsString().isEmpty()) {
+                                    // 保持目标对象不变
+                                } else {
+                                    // 尝试将源字符串解析为JSON对象
+                                    try {
+                                        JsonObject parsedSourceArgs = gson.fromJson(sourceArgs.getAsString(), JsonObject.class);
+                                        mergeJsonObjects(targetArgs.getAsJsonObject(), parsedSourceArgs);
+                                    } catch (Exception e) {
+                                        // 解析失败，忽略
+                                        log.debug("无法将源参数字符串解析为JSON对象: {}", sourceArgs.getAsString());
+                                    }
+                                }
+                            } else {
+                                // 其他情况，优先使用非空的参数
+                                if ((sourceArgs.isJsonPrimitive() && !sourceArgs.getAsString().isEmpty()) ||
+                                    (sourceArgs.isJsonObject() && sourceArgs.getAsJsonObject().size() > 0)) {
+                                    targetFunction.add("arguments", sourceArgs);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        /**
+         * 递归合并两个JsonObject对象
+         */
+        private void mergeJsonObjects(JsonObject target, JsonObject source) {
+            for (Map.Entry<String, JsonElement> entry : source.entrySet()) {
+                String key = entry.getKey();
+                JsonElement value = entry.getValue();
+                
+                if (value.isJsonObject() && target.has(key) && target.get(key).isJsonObject()) {
+                    // 递归合并嵌套对象
+                    mergeJsonObjects(target.getAsJsonObject(key), value.getAsJsonObject());
+                } else {
+                    // 直接替换或添加值
+                    target.add(key, value);
+                }
             }
         }
         
@@ -318,9 +719,175 @@ public class McpSseServiceImpl implements McpSseService {
     
     @Override
     public void sendToolResult(String promptId, String toolCallId, String result) throws IOException {
-        // 工具结果发送（如果需要的话）
-        // 在本实现中简化处理
-        log.debug("工具结果发送功能暂未实现");
+        if (config.isUseMcpProtocol()) {
+            // 使用MCP协议发送工具结果
+            String url = getFullServerPath() + "/tool-result";
+            
+            JsonObject requestBody = new JsonObject();
+            requestBody.addProperty("id", promptId); // 提示ID
+            requestBody.addProperty("tool_call_id", toolCallId); // 工具调用ID
+            requestBody.addProperty("result", result); // 工具执行结果
+            
+            log.info("发送工具执行结果 (ID: {}): {}", toolCallId, result);
+            
+            Request request = new Request.Builder()
+                    .url(url)
+                    .post(RequestBody.create(requestBody.toString(), JSON))
+                    .header("Authorization", "Bearer " + config.getApiKey())
+                    .build();
+            
+            try (Response response = httpClient.newCall(request).execute()) {
+                if (!response.isSuccessful()) {
+                    log.error("发送工具结果失败，HTTP状态码: {}", response.code());
+                    throw new IOException("发送工具结果失败: " + response.code());
+                }
+                
+                log.debug("发送工具结果成功");
+            }
+        } else {
+            // 直接API调用模式下的工具结果处理
+            // 火山引擎可能不直接支持这种方式
+            log.warn("当前模式不支持直接发送工具结果，结果将被丢弃: {}", result);
+        }
+    }
+    
+    /**
+     * 执行工具调用
+     * 
+     * @param toolCall 工具调用信息
+     * @return 工具执行结果
+     */
+    private String executeToolCall(ToolCall toolCall) {
+        log.info("开始执行工具: {}", toolCall.getFunction());
+        
+        // 如果是使用MCP协议，应该将工具调用请求发送给MCP服务器
+        if (config.isUseMcpProtocol() || config.isUseLocalServer()) {
+            return executeToolViaServer(toolCall);
+        }
+
+        // 默认返回一个通用消息
+        return "工具 " + toolCall.getFunction() + " 执行成功，但没有具体实现逻辑。";
+    }
+    
+    /**
+     * 通过MCP服务器执行工具
+     * 
+     * @param toolCall 工具调用信息
+     * @return 工具执行结果
+     */
+    private String executeToolViaServer(ToolCall toolCall) {
+        log.info("通过服务器执行工具: {}", toolCall.getFunction());
+        
+        // 尝试多种可能的API路径和格式
+        List<String> possibleApis = new ArrayList<>();
+        possibleApis.add("api/tools/execute");         // 标准格式
+        
+        Exception lastException = null;
+        
+        // 构建基础URL
+        String baseUrl = config.getServerUrl();
+        if (!baseUrl.endsWith("/")) {
+            baseUrl += "/";
+        }
+        
+        // 尝试每种可能的API路径
+        for (String apiPath : possibleApis) {
+            String url = baseUrl + apiPath;
+            
+            try {
+                // 创建标准请求格式
+                JsonObject requestBody = new JsonObject();
+                requestBody.addProperty("tool_name", toolCall.getFunction());
+                
+                // 添加工具参数
+                if (toolCall.getArguments() != null && !toolCall.getArguments().isEmpty()) {
+                    JsonObject argsObj = gson.toJsonTree(toolCall.getArguments()).getAsJsonObject();
+                    requestBody.add("arguments", argsObj);
+                } else {
+                    requestBody.add("arguments", new JsonObject());
+                }
+                
+                // 添加调用ID以便追踪 - 使用服务器分配的clientId
+                // 如果服务器没有分配ID，则使用currentPromptId作为备选方案
+                if (this.clientId != null && !this.clientId.isEmpty() && !this.clientId.equals(UUID.randomUUID().toString())) {
+                    requestBody.addProperty("client_id", this.clientId);
+                    log.debug("使用服务器分配的客户端ID: {}", this.clientId);
+                } else {
+                    requestBody.addProperty("client_id", this.currentPromptId);
+                    log.debug("未找到服务器分配的客户端ID，使用当前提示ID: {}", this.currentPromptId);
+                }
+                
+                log.debug("尝试工具执行API: {} 请求: {}", url, requestBody);
+                
+                // 创建POST请求
+                Request request = new Request.Builder()
+                        .url(url)
+                        .post(RequestBody.create(requestBody.toString(), JSON))
+                        .header("Content-Type", "application/json")
+                        .build();
+                
+                // 发送请求
+                try (Response response = httpClient.newCall(request).execute()) {
+                    if (response.isSuccessful()) {
+                        // 解析响应
+                        String responseBody = response.body().string();
+                        log.debug("工具执行响应: {}", responseBody);
+                        
+                        try {
+                            // 尝试解析为JSON
+                            JsonObject resultObj = gson.fromJson(responseBody, JsonObject.class);
+                            
+                            // 处理几种可能的响应格式
+                            if (resultObj.has("result")) {
+                                return resultObj.get("result").getAsString();
+                            } else if (resultObj.has("response")) {
+                                return resultObj.get("response").getAsString();
+                            } else if (resultObj.has("data")) {
+                                // 处理data字段，可能包含结果
+                                JsonElement dataElem = resultObj.get("data");
+                                if (dataElem.isJsonObject()) {
+                                    JsonObject dataObj = dataElem.getAsJsonObject();
+                                    if (dataObj.has("result")) {
+                                        return dataObj.get("result").getAsString();
+                                    }
+                                } else if (dataElem.isJsonPrimitive()) {
+                                    return dataElem.getAsString();
+                                }
+                            }
+                            
+                            // 检查错误信息
+                            if (resultObj.has("error")) {
+                                String error = "工具执行错误: " + resultObj.get("error").getAsString();
+                                log.error(error);
+                                return error;
+                            }
+                            
+                            // 如果没有找到明确的结果字段，但响应成功，可能整个响应就是结果
+                            return responseBody;
+                        } catch (Exception e) {
+                            // 如果不是JSON格式，直接返回响应体作为结果
+                            return responseBody;
+                        }
+                    } else {
+                        // 本路径未成功，尝试下一个
+                        log.debug("API路径 {} 返回状态码: {}, 尝试下一个路径", url, response.code());
+                        lastException = new IOException("状态码: " + response.code());
+                    }
+                }
+            } catch (Exception e) {
+                log.debug("尝试API路径 {} 时出错: {}", url, e.getMessage());
+                lastException = e;
+                // 继续尝试下一个路径
+            }
+        }
+        
+        // 所有路径都尝试过，但都失败了
+        String error = "所有工具执行API路径都尝试失败";
+        if (lastException != null) {
+            error += ": " + lastException.getMessage();
+        }
+        log.error(error);
+        return error;
     }
     
     @Override
@@ -347,5 +914,43 @@ public class McpSseServiceImpl implements McpSseService {
         }
         
         log.info("MCP SSE服务已关闭");
+    }
+    
+    /**
+     * 转换参数格式，处理嵌套结构
+     * 
+     * @param toolName 工具名称
+     * @param arguments 原始参数
+     * @return 转换后的参数
+     */
+    private Map<String, Object> convertArguments(String toolName, Map<String, Object> arguments) {
+        if (arguments == null || arguments.isEmpty()) {
+            return arguments;
+        }
+        
+        log.debug("转换参数格式，原始参数: {}", gson.toJson(arguments));
+        
+        // 检查是否有嵌套对象
+        for (String key : new HashSet<>(arguments.keySet())) {
+            Object value = arguments.get(key);
+            if (value instanceof Map) {
+                // 发现嵌套Map，提取其内容合并到顶层
+                @SuppressWarnings("unchecked")
+                Map<String, Object> nestedMap = (Map<String, Object>) value;
+                
+                log.debug("发现嵌套参数: {} = {}", key, gson.toJson(nestedMap));
+                
+                // 移除嵌套对象
+                arguments.remove(key);
+                
+                // 将嵌套对象的内容合并到顶层
+                arguments.putAll(nestedMap);
+                
+                log.debug("参数转换后: {}", gson.toJson(arguments));
+                return arguments;
+            }
+        }
+        
+        return arguments;
     }
 } 

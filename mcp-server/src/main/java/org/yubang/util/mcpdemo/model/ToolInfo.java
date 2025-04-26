@@ -1,6 +1,8 @@
 package org.yubang.util.mcpdemo.model;
 
 import lombok.Data;
+import java.util.List;
+import java.util.Map;
 
 /**
  * 工具信息类
@@ -28,4 +30,10 @@ public class ToolInfo {
      * 工具所在类名
      */
     private String className;
+    
+    /**
+     * 工具参数列表
+     * 每个参数包含name、type、description和required属性
+     */
+    private List<Map<String, Object>> parameters;
 } 

@@ -85,7 +85,7 @@ public class SseController {
      * 处理并通过SSE发送给对应的客户端
      * 此端点通常由LLM服务或MCP中间件调用
      */
-    @PostMapping("/chat")
+    @PostMapping("/tools/execute")
     public Map<String, Object> handleChat(@RequestBody Map<String, Object> request) {
         log.info("收到聊天响应转发请求: {}", request);
         
