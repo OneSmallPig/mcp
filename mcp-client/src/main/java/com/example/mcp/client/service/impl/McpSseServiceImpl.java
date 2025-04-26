@@ -79,10 +79,17 @@ public class McpSseServiceImpl implements McpSseService {
         // 关闭可能存在的连接
         if (currentEventSource != null) {
             currentEventSource.cancel();
+            currentEventSource = null;
+        }
+        
+        // 检查配置中是否设置了SSE服务器URL
+        String url = config.getSseServerUrl();
+        if (url == null || url.isEmpty()) {
+            log.info("未配置SSE服务器URL，跳过初始连接");
+            return;
         }
         
         // 构建SSE连接URL
-        String url = config.getSseServerUrl();
         if (!url.endsWith("/")) {
             url += "/";
         }
@@ -97,29 +104,36 @@ public class McpSseServiceImpl implements McpSseService {
                 .build();
         
         // 创建SSE连接
-        currentEventSource = EventSources.createFactory(httpClient)
-                .newEventSource(request, new EventSourceListener() {
-                    @Override
-                    public void onOpen(EventSource eventSource, Response response) {
-                        log.info("SSE连接已打开");
-                    }
-                    
-                    @Override
-                    public void onEvent(EventSource eventSource, String id, String type, String data) {
-                        // 这里不处理事件，只记录
-                        log.debug("收到未处理的SSE事件: type={}, id={}, data={}", type, id, data);
-                    }
-                    
-                    @Override
-                    public void onClosed(EventSource eventSource) {
-                        log.info("SSE连接已关闭");
-                    }
-                    
-                    @Override
-                    public void onFailure(EventSource eventSource, Throwable t, Response response) {
-                        log.error("SSE连接失败", t);
-                    }
-                });
+        try {
+            currentEventSource = EventSources.createFactory(httpClient)
+                    .newEventSource(request, new EventSourceListener() {
+                        @Override
+                        public void onOpen(EventSource eventSource, Response response) {
+                            log.info("初始SSE连接已打开");
+                        }
+                        
+                        @Override
+                        public void onEvent(EventSource eventSource, String id, String type, String data) {
+                            // 这里不处理事件，只记录
+                            log.debug("初始连接收到未处理的SSE事件: type={}, id={}, data={}", type, id, data);
+                        }
+                        
+                        @Override
+                        public void onClosed(EventSource eventSource) {
+                            log.info("初始SSE连接已关闭");
+                        }
+                        
+                        @Override
+                        public void onFailure(EventSource eventSource, Throwable t, Response response) {
+                            log.error("初始SSE连接失败", t);
+                            // 连接失败时清除引用，以便下次重新尝试
+                            currentEventSource = null;
+                        }
+                    });
+        } catch (Exception e) {
+            log.error("创建初始SSE连接失败", e);
+            currentEventSource = null;
+        }
     }
     
     @Override
@@ -213,6 +227,7 @@ public class McpSseServiceImpl implements McpSseService {
     private class SseSourceListener extends EventSourceListener {
         private final SseEventListener userListener;
         private final StringBuilder contentBuilder = new StringBuilder();
+        private boolean completed = false;
         
         public SseSourceListener(SseEventListener userListener) {
             this.userListener = userListener;
@@ -221,15 +236,18 @@ public class McpSseServiceImpl implements McpSseService {
         @Override
         public void onOpen(EventSource eventSource, Response response) {
             log.debug("SSE连接已打开: {}", response.code());
-            // 通知连接已建立，使用onTextChunk发送空消息
-            userListener.onTextChunk("");
+            // 通知连接已建立，但不触发任何输出
         }
         
         @Override
         public void onEvent(EventSource eventSource, String id, String type, String data) {
+            if (completed) {
+                return; // 已经完成，不再处理事件
+            }
+            
             if (data == null || data.trim().isEmpty() || "[DONE]".equals(data.trim())) {
                 log.debug("收到结束事件: {}", data);
-                userListener.onComplete();
+                completeEvent();
                 return;
             }
             
@@ -254,6 +272,16 @@ public class McpSseServiceImpl implements McpSseService {
             }
         }
         
+        /**
+         * 安全地触发一次完成事件
+         */
+        private synchronized void completeEvent() {
+            if (!completed) {
+                completed = true;
+                userListener.onComplete();
+            }
+        }
+        
         @Override
         public void onFailure(EventSource eventSource, Throwable t, Response response) {
             String errorMsg;
@@ -272,12 +300,19 @@ public class McpSseServiceImpl implements McpSseService {
                 log.error("SSE连接失败", t);
                 userListener.onError(t);
             }
+            
+            // 失败也标记为完成，避免重复触发
+            completed = true;
         }
         
         @Override
         public void onClosed(EventSource eventSource) {
             log.debug("SSE连接已关闭");
-            userListener.onComplete();
+            // 不再这里触发onComplete，改为在收到[DONE]事件时触发
+            // 如果没有收到[DONE]但连接关闭，才触发完成
+            if (!completed) {
+                completeEvent();
+            }
         }
     }
     
@@ -290,14 +325,27 @@ public class McpSseServiceImpl implements McpSseService {
     
     @Override
     public void close() {
+        log.info("正在关闭MCP SSE服务...");
+        
         if (currentEventSource != null) {
             try {
+                // 先尝试优雅关闭
                 currentEventSource.close();
-                currentEventSource = null;
             } catch (Exception e) {
-                log.warn("关闭SSE连接时出错", e);
+                log.warn("正常关闭SSE连接时出错", e);
+                
+                try {
+                    // 如果优雅关闭失败，尝试强制取消
+                    currentEventSource.cancel();
+                } catch (Exception ex) {
+                    log.warn("强制取消SSE连接时出错", ex);
+                }
+            } finally {
+                // 无论如何清除引用
+                currentEventSource = null;
             }
         }
-        log.info("已关闭MCP SSE服务");
+        
+        log.info("MCP SSE服务已关闭");
     }
 } 

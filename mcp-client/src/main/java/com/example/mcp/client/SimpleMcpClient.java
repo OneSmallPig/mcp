@@ -1,9 +1,12 @@
 package com.example.mcp.client;
 
-import com.example.mcp.client.model.ToolCall;
+import com.example.mcp.client.config.McpClientConfig;
+import com.example.mcp.client.model.Message;
 import com.example.mcp.client.service.McpSseService;
-import com.example.mcp.client.service.impl.McpSseServiceImpl;
 import com.example.mcp.client.service.SimpleSseEventListener;
+import com.example.mcp.client.service.BufferedSseEventListener;
+import com.example.mcp.client.service.impl.McpSseServiceImpl;
+import com.example.mcp.client.model.ToolCall;
 import com.google.gson.Gson;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -49,13 +52,8 @@ public class SimpleMcpClient {
             messageHistory.add(userMessage);
             currentResponse = "";
             
-            sseService.sendPrompt(userMessage, new SimpleSseEventListener() {
-                @Override
-                public void onTextChunk(String text) {
-                    currentResponse += text;
-                    callback.onAiResponse(text);
-                }
-                
+            // 创建缓冲式监听器
+            BufferedSseEventListener listener = new BufferedSseEventListener() {
                 @Override
                 public void onToolCall(ToolCall toolCall) {
                     callback.onToolUse(toolCall.getFunction(), 
@@ -69,10 +67,19 @@ public class SimpleMcpClient {
                 
                 @Override
                 public void onComplete() {
-                    // 保存AI回复到历史
+                    // 调用父类方法
+                    super.onComplete();
+                    
+                    // 获取完整响应
+                    currentResponse = getCompleteResponse();
+                    
+                    // 只在这里输出一次完整响应
                     if (!currentResponse.isEmpty()) {
+                        callback.onAiResponse(currentResponse);
+                        // 保存AI回复到历史
                         messageHistory.add(currentResponse);
                     }
+                    
                     callback.onFinished();
                 }
                 
@@ -81,7 +88,11 @@ public class SimpleMcpClient {
                     log.error("聊天错误", t);
                     callback.onError(t.getMessage());
                 }
-            });
+            };
+            
+            // 发送请求
+            sseService.sendPrompt(userMessage, listener);
+            
         } catch (IOException e) {
             log.error("发送请求失败", e);
             callback.onError("发送请求失败: " + e.getMessage());
@@ -97,25 +108,25 @@ public class SimpleMcpClient {
      */
     public CompletableFuture<String> chatAsync(String userMessage) {
         CompletableFuture<String> future = new CompletableFuture<>();
-        StringBuilder response = new StringBuilder();
         
         try {
-            sseService.sendPrompt(userMessage, new SimpleSseEventListener() {
-                @Override
-                public void onTextChunk(String text) {
-                    response.append(text);
-                }
-                
+            // 创建缓冲式监听器
+            BufferedSseEventListener listener = new BufferedSseEventListener() {
                 @Override
                 public void onComplete() {
-                    future.complete(response.toString());
+                    // 完成时返回完整响应
+                    future.complete(getCompleteResponse());
                 }
                 
                 @Override
                 public void onError(Throwable t) {
                     future.completeExceptionally(t);
                 }
-            });
+            };
+            
+            // 发送请求
+            sseService.sendPrompt(userMessage, listener);
+            
         } catch (IOException e) {
             future.completeExceptionally(e);
         }
@@ -199,17 +210,8 @@ public class SimpleMcpClient {
             // 创建SSE服务
             McpSseService sseService = new McpSseServiceImpl();
             
-            // 创建SSE事件监听器
-            SimpleSseEventListener listener = new SimpleSseEventListener() {
-                StringBuilder responseText = new StringBuilder();
-                
-                @Override
-                public void onTextChunk(String text) {
-                    log.info("收到文本: {}", text);
-                    responseText.append(text);
-                    System.out.print(text); // 直接打印到控制台，模拟流式输出
-                }
-                
+            // 创建缓冲式SSE事件监听器
+            BufferedSseEventListener listener = new BufferedSseEventListener() {
                 @Override
                 public void onToolCall(ToolCall toolCall) {
                     log.info("收到工具调用: {} {}", toolCall.getFunction(), toolCall.getArguments());
@@ -224,8 +226,17 @@ public class SimpleMcpClient {
                 
                 @Override
                 public void onComplete() {
+                    // 调用父类方法
+                    super.onComplete();
+                    
+                    // 获取并输出完整响应
+                    String completeResponse = getCompleteResponse();
+                    if (!completeResponse.isEmpty()) {
+                        System.out.println("\nAssistant: " + completeResponse);
+                    }
+                    
                     log.info("对话完成");
-                    System.out.println("\n\n对话完成！");
+                    System.out.println("\n对话完成！");
                 }
                 
                 @Override
@@ -246,10 +257,10 @@ public class SimpleMcpClient {
                 Thread.currentThread().interrupt();
             }
             
-            // 关闭SSE连接
+            // 关闭连接
             sseService.close();
             
-        } catch (Exception e) {
+        } catch (IOException e) {
             log.error("SSE对话失败", e);
         }
     }

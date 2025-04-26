@@ -98,8 +98,6 @@ public final class EventSources {
             String eventType = "message";
             
             while (!canceled && (line = reader.readLine()) != null) {
-                log.debug("SSE line: {}", line);
-                
                 if (line.isEmpty()) {
                     // 空行表示事件的结束
                     if (dataBuilder.length() > 0) {

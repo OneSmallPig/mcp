@@ -7,10 +7,11 @@ import com.example.mcp.client.model.Message;
 import com.example.mcp.client.model.Tool;
 import com.example.mcp.client.model.ToolCall;
 import com.example.mcp.client.service.McpService;
-import com.example.mcp.client.service.impl.McpServiceImpl;
 import com.example.mcp.client.service.McpSseService;
-import com.example.mcp.client.service.impl.McpSseServiceImpl;
 import com.example.mcp.client.service.SimpleSseEventListener;
+import com.example.mcp.client.service.BufferedSseEventListener;
+import com.example.mcp.client.service.impl.McpServiceImpl;
+import com.example.mcp.client.service.impl.McpSseServiceImpl;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import org.slf4j.Logger;
@@ -214,22 +215,13 @@ public class McpClientApplication {
             messages.add(new Message("user", input));
             
             try {
-                // 创建交互式应答收集器
-                StringBuilder currentResponse = new StringBuilder();
-                List<ToolCall> currentToolCalls = new ArrayList<>();
-                
-                // 发送请求
-                mcpSseService.sendPrompt(messages, input, new SimpleSseEventListener() {
-                    @Override
-                    public void onTextChunk(String text) {
-                        // 打印实时文本
-                        System.out.print(text);
-                        currentResponse.append(text);
-                    }
+                // 创建缓冲式应答收集器
+                BufferedSseEventListener bufferedListener = new BufferedSseEventListener() {
+                    private final List<ToolCall> currentToolCalls = new ArrayList<>();
                     
                     @Override
                     public void onToolCall(ToolCall toolCall) {
-                        System.out.println("\n\n[工具调用] " + toolCall.getFunction());
+                        System.out.println("\n[工具调用] " + toolCall.getFunction());
                         System.out.println("参数: " + gson.toJson(toolCall.getArguments()));
                         currentToolCalls.add(toolCall);
                     }
@@ -241,11 +233,16 @@ public class McpClientApplication {
                     
                     @Override
                     public void onComplete() {
-                        System.out.println("\n");
+                        // 调用父类方法
+                        super.onComplete();
                         
-                        // 将完整回复添加到历史
-                        if (currentResponse.length() > 0) {
-                            Message assistantMessage = new Message("assistant", currentResponse.toString());
+                        // 获取并输出完整响应
+                        String completeResponse = getCompleteResponse();
+                        if (!completeResponse.isEmpty()) {
+                            System.out.println("\nAssistant: " + completeResponse);
+                            
+                            // 将完整回复添加到历史
+                            Message assistantMessage = new Message("assistant", completeResponse);
                             assistantMessage.setToolCalls(currentToolCalls);
                             messages.add(assistantMessage);
                         }
@@ -255,7 +252,10 @@ public class McpClientApplication {
                     public void onError(Throwable t) {
                         System.err.println("\n错误: " + t.getMessage());
                     }
-                });
+                };
+                
+                // 发送请求
+                mcpSseService.sendPrompt(messages, input, bufferedListener);
                 
             } catch (IOException e) {
                 System.err.println("发送请求失败: " + e.getMessage());
