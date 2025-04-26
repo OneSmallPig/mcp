@@ -197,18 +197,74 @@ public class McpClientApplication {
     private static void runSseInteractiveMode(McpSseService mcpSseService) {
         Scanner scanner = new Scanner(System.in);
         List<Message> messages = new ArrayList<>();
+        final String END_MARKER = "/end";
+        final String CANCEL_MARKER = "/cancel";
         
-        System.out.println("欢迎使用MCP客户端SSE模式！输入'exit'退出。");
+        System.out.println("欢迎使用MCP客户端SSE模式！");
+        System.out.println("- 输入'" + END_MARKER + "'结束多行输入并发送消息");
+        System.out.println("- 输入'" + CANCEL_MARKER + "'取消当前输入");
+        System.out.println("- 输入'exit'退出程序");
+        System.out.println("你可以直接输入单行文本，或使用回车输入多行文本，以'" + END_MARKER + "'结束。");
         
         // 添加系统提示
         messages.add(new Message("system", "You are a helpful assistant. When user requests a tool function, always try to call the available tools to satisfy their request."));
         
         while (true) {
-            System.out.print("\nUser: ");
-            String input = scanner.nextLine().trim();
+            StringBuilder inputBuilder = new StringBuilder();
+            boolean isMultiLine = false;
             
-            if ("exit".equalsIgnoreCase(input)) {
+            System.out.print("\nUser: ");
+            
+            // 读取第一行
+            String line = scanner.nextLine().trim();
+            
+            // 检查是否退出
+            if ("exit".equalsIgnoreCase(line)) {
                 break;
+            }
+            
+            // 普通单行模式
+            inputBuilder.append(line);
+            
+            // 如果第一行不为空且不包含结束标记，启用多行模式
+            if (!line.isEmpty() && !line.equals(END_MARKER)) {
+                if (line.equals(CANCEL_MARKER)) {
+                    System.out.println("已取消当前输入。");
+                    continue;
+                }
+                
+                // 检查输入结束标记
+                while (!line.equals(END_MARKER)) {
+                    // 等待下一行输入
+                    System.out.print("> ");
+                    line = scanner.nextLine().trim();
+                    
+                    // 如果输入取消标记，取消整个输入
+                    if (line.equals(CANCEL_MARKER)) {
+                        inputBuilder.setLength(0); // 清空输入
+                        System.out.println("已取消当前输入。");
+                        break;
+                    }
+                    
+                    // 如果不是结束标记，添加到输入中
+                    if (!line.equals(END_MARKER)) {
+                        // 添加换行符和当前行
+                        inputBuilder.append("\n").append(line);
+                        isMultiLine = true;
+                    }
+                }
+            }
+            
+            // 如果输入被取消，继续下一轮
+            if (inputBuilder.length() == 0) {
+                continue;
+            }
+            
+            String input = inputBuilder.toString();
+            
+            // 显示实际处理的输入（多行模式下）
+            if (isMultiLine) {
+                System.out.println("\n处理多行输入：\n---\n" + input + "\n---");
             }
             
             // 添加用户消息
@@ -277,15 +333,70 @@ public class McpClientApplication {
         
         Scanner scanner = new Scanner(System.in);
         SimpleMcpClient client = new SimpleMcpClient();
+        final String END_MARKER = "/end";
+        final String CANCEL_MARKER = "/cancel";
         
-        System.out.println("欢迎使用MCP简化客户端！输入'exit'退出。");
+        System.out.println("欢迎使用MCP简化客户端！");
+        System.out.println("- 输入'" + END_MARKER + "'结束多行输入并发送消息");
+        System.out.println("- 输入'" + CANCEL_MARKER + "'取消当前输入");
+        System.out.println("- 输入'exit'退出程序");
         
         while (true) {
-            System.out.print("\nUser: ");
-            String input = scanner.nextLine().trim();
+            StringBuilder inputBuilder = new StringBuilder();
+            boolean isMultiLine = false;
             
-            if ("exit".equalsIgnoreCase(input)) {
+            System.out.print("\nUser: ");
+            
+            // 读取第一行
+            String line = scanner.nextLine().trim();
+            
+            // 检查是否退出
+            if ("exit".equalsIgnoreCase(line)) {
                 break;
+            }
+            
+            // 普通单行模式
+            inputBuilder.append(line);
+            
+            // 如果第一行不为空且不包含结束标记，启用多行模式
+            if (!line.isEmpty() && !line.equals(END_MARKER)) {
+                if (line.equals(CANCEL_MARKER)) {
+                    System.out.println("已取消当前输入。");
+                    continue;
+                }
+                
+                // 检查输入结束标记
+                while (!line.equals(END_MARKER)) {
+                    // 等待下一行输入
+                    System.out.print("> ");
+                    line = scanner.nextLine().trim();
+                    
+                    // 如果输入取消标记，取消整个输入
+                    if (line.equals(CANCEL_MARKER)) {
+                        inputBuilder.setLength(0); // 清空输入
+                        System.out.println("已取消当前输入。");
+                        break;
+                    }
+                    
+                    // 如果不是结束标记，添加到输入中
+                    if (!line.equals(END_MARKER)) {
+                        // 添加换行符和当前行
+                        inputBuilder.append("\n").append(line);
+                        isMultiLine = true;
+                    }
+                }
+            }
+            
+            // 如果输入被取消，继续下一轮
+            if (inputBuilder.length() == 0) {
+                continue;
+            }
+            
+            final String input = inputBuilder.toString();
+            
+            // 显示实际处理的输入（多行模式下）
+            if (isMultiLine) {
+                System.out.println("\n处理多行输入：\n---\n" + input + "\n---");
             }
             
             try {

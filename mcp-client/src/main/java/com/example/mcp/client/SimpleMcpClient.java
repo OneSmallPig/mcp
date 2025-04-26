@@ -15,6 +15,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.Scanner;
 
 /**
  * 简化的MCP客户端，专为初学者设计
@@ -270,20 +271,106 @@ public class SimpleMcpClient {
      */
     public static void main(String[] args) {
         SimpleMcpClient client = new SimpleMcpClient();
+        final String END_MARKER = "/end";
+        final String CANCEL_MARKER = "/cancel";
         
-        // 示例1：使用标准HTTP API方式调用
-        // client.simpleChat("你好，请介绍一下自己");
+        System.out.println("MCP客户端简化版 - 支持多行输入");
+        System.out.println("- 输入'" + END_MARKER + "'结束多行输入并发送消息");
+        System.out.println("- 输入'" + CANCEL_MARKER + "'取消当前输入");
+        System.out.println("- 输入'exit'退出程序");
         
-        // 示例2：使用SSE方式与大模型对话
-        client.chatWithSse("北京的天气怎么样？");
+        Scanner scanner = new Scanner(System.in);
         
-        // 等待3秒后退出，确保有时间看到结果
-        try {
-            Thread.sleep(3000);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
+        while (true) {
+            StringBuilder inputBuilder = new StringBuilder();
+            boolean isMultiLine = false;
+            
+            System.out.print("\nUser: ");
+            
+            // 读取第一行
+            String line = scanner.nextLine().trim();
+            
+            // 检查是否退出
+            if ("exit".equalsIgnoreCase(line)) {
+                break;
+            }
+            
+            // 普通单行模式
+            inputBuilder.append(line);
+            
+            // 如果第一行不为空且不包含结束标记，启用多行模式
+            if (!line.isEmpty() && !line.equals(END_MARKER)) {
+                if (line.equals(CANCEL_MARKER)) {
+                    System.out.println("已取消当前输入。");
+                    continue;
+                }
+                
+                // 检查输入结束标记
+                while (!line.equals(END_MARKER)) {
+                    // 等待下一行输入
+                    System.out.print("> ");
+                    line = scanner.nextLine().trim();
+                    
+                    // 如果输入取消标记，取消整个输入
+                    if (line.equals(CANCEL_MARKER)) {
+                        inputBuilder.setLength(0); // 清空输入
+                        System.out.println("已取消当前输入。");
+                        break;
+                    }
+                    
+                    // 如果不是结束标记，添加到输入中
+                    if (!line.equals(END_MARKER)) {
+                        // 添加换行符和当前行
+                        inputBuilder.append("\n").append(line);
+                        isMultiLine = true;
+                    }
+                }
+            }
+            
+            // 如果输入被取消，继续下一轮
+            if (inputBuilder.length() == 0) {
+                continue;
+            }
+            
+            final String input = inputBuilder.toString();
+            
+            // 显示实际处理的输入（多行模式下）
+            if (isMultiLine) {
+                System.out.println("\n处理多行输入：\n---\n" + input + "\n---");
+            }
+            
+            // 创建回调处理响应
+            client.chat(input, new ChatCallback() {
+                @Override
+                public void onAiResponse(String text) {
+                    System.out.println("\nAssistant: " + text);
+                }
+                
+                @Override
+                public void onToolUse(String toolName, String parameters) {
+                    System.out.println("\n[使用工具] " + toolName);
+                    System.out.println("参数: " + parameters);
+                }
+                
+                @Override
+                public void onToolResult(String toolName, String result) {
+                    System.out.println("[工具结果] " + toolName + ": " + result);
+                }
+                
+                @Override
+                public void onFinished() {
+                    System.out.println();
+                }
+                
+                @Override
+                public void onError(String errorMessage) {
+                    System.err.println("\n错误: " + errorMessage);
+                }
+            });
         }
         
-        System.exit(0);
+        client.close();
+        System.out.println("感谢使用，再见！");
+        scanner.close();
     }
 } 
