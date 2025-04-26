@@ -46,7 +46,8 @@ public final class EventSources {
             this.listener = listener;
         }
         
-        void connect() {
+        @Override
+        public void connect() {
             Request request = this.request.newBuilder()
                     .header("Accept", "text/event-stream")
                     .build();
@@ -141,6 +142,16 @@ public final class EventSources {
             if (call != null) {
                 call.cancel();
             }
+        }
+        
+        @Override
+        public boolean isClosed() {
+            return canceled || (call != null && call.isCanceled());
+        }
+        
+        @Override
+        public void close() throws IOException {
+            cancel();
         }
     }
     

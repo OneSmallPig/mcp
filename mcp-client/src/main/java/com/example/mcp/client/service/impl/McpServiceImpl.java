@@ -1,4 +1,4 @@
-package com.example.mcp.client.service;
+package com.example.mcp.client.service.impl;
 
 import com.example.mcp.client.config.McpClientConfig;
 import com.example.mcp.client.model.ChatRequest;
@@ -6,6 +6,9 @@ import com.example.mcp.client.model.ChatResponse;
 import com.example.mcp.client.model.Message;
 import com.example.mcp.client.model.Tool;
 import com.example.mcp.client.model.ToolCall;
+import com.example.mcp.client.service.McpService;
+import com.example.mcp.client.service.VolcanoDeepSeekClient;
+import com.example.mcp.client.util.JarToolScanner;
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
@@ -24,7 +27,6 @@ import java.net.Socket;
 import java.net.URL;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -94,16 +96,6 @@ public class McpServiceImpl implements McpService {
             if (config.getServerUrl() != null && !config.getServerUrl().isEmpty()) {
                 fetchToolsFromMcpServer();
             }
-        }
-        
-        // 输出可用工具信息
-        if (!config.getTools().isEmpty()) {
-            log.info("可用工具列表:");
-            for (Tool tool : config.getTools()) {
-                log.info("  - {}: {}", tool.getName(), tool.getDescription());
-            }
-        } else {
-            log.info("未找到可用工具");
         }
     }
     
@@ -1045,322 +1037,66 @@ public class McpServiceImpl implements McpService {
                 return;
             }
             
-            if (!baseUrl.endsWith("/")) {
-                baseUrl += "/";
-            }
-            
-            // 首先尝试通过MCP协议获取工具列表
-            if (fetchToolsViaMcp(baseUrl)) {
-                log.info("已通过MCP协议获取工具列表");
-                return;
-            }
-            
-            // 如果MCP协议获取失败，尝试HTTP REST API方式
-            // 尝试多个可能的Spring Boot应用工具端点
-            List<String> endpoints = Arrays.asList(
-                "api/tools",          // 标准API端点
-                "tools",              // 直接端点
-                "api/functions",      // 函数别名
-                "functions",          // 直接函数端点
-                "ai/tools",           // AI特定端点
-                "springai/tools",     // Spring AI特定端点
-                "actuator/tools",     // Spring Boot Actuator
-                "actuator/ai/tools"   // Spring Boot Actuator AI
-            );
-            
-            for (String endpoint : endpoints) {
-                String url = baseUrl + endpoint;
-                log.info("尝试从端点获取工具列表: {}", url);
-                
-                Request request = new Request.Builder()
-                        .url(url)
-                        .get()
-                        .build();
-                
-                try (Response response = httpClient.newCall(request).execute()) {
-                    if (!response.isSuccessful()) {
-                        log.debug("端点 {} 返回状态码: {}", endpoint, response.code());
-                        continue;
-                    }
-                    
-                    if (response.body() == null) {
-                        log.debug("端点 {} 返回空响应体", endpoint);
-                        continue;
-                    }
-                    
-                    String responseBody = response.body().string();
-                    if (responseBody.trim().isEmpty()) {
-                        log.debug("端点 {} 返回空内容", endpoint);
-                        continue;
-                    }
-                    
-                    log.debug("端点 {} 返回响应: {}", endpoint, responseBody);
-                    
-                    // 尝试解析工具列表
-                    List<Tool> tools = parseToolsFromResponse(responseBody);
-                    if (tools != null && !tools.isEmpty()) {
-                        log.info("从端点 {} 成功获取到 {} 个工具", endpoint, tools.size());
-                        config.clearTools();
-                        config.addTools(tools);
-                        return;
-                    }
-                } catch (Exception e) {
-                    log.debug("请求端点 {} 失败: {}", endpoint, e.getMessage());
+            // 检查服务器类型，如果是jar类型，尝试通过反射获取工具
+            if ("jar".equals(config.getServerType())) {
+                if (fetchToolsFromJarFile()) {
+                    log.info("已通过反射从JAR文件获取工具列表");
+                    return;
                 }
             }
-            
-            // 如果通过端点没有找到工具，尝试从应用信息中获取
-            tryGetToolsFromAppInfo(baseUrl);
-            
         } catch (Exception e) {
             log.error("从已启动的JAR服务器获取工具列表失败: {}", e.getMessage());
         }
     }
-    
+
     /**
-     * 使用MCP协议格式获取工具列表
-     * 
-     * @param baseUrl 服务器基础URL
+     * 通过反射从JAR文件中获取工具列表
      * @return 是否成功获取工具列表
      */
-    private boolean fetchToolsViaMcp(String baseUrl) {
-        log.info("尝试通过MCP协议获取工具列表...");
-        
-        Socket socket = null;
+    private boolean fetchToolsFromJarFile() {
         try {
-            // 构建MCP连接
-            URL url = new URL(baseUrl);
-            int port = config.getMcpServerPort();
-            String host = url.getHost();
+            log.info("尝试通过反射从JAR文件中获取工具列表...");
             
-            log.info("连接MCP服务器 {}:{}", host, port);
+            String jarPath = null;
             
-            // 创建带超时的Socket连接
-            socket = new Socket();
-            socket.connect(new java.net.InetSocketAddress(host, port), config.getTimeout() * 1000);
-            socket.setSoTimeout(config.getTimeout() * 1000);  // 设置读取超时
-            
-            try (BufferedWriter writer = new BufferedWriter(new OutputStreamWriter(socket.getOutputStream()));
-                 BufferedReader reader = new BufferedReader(new InputStreamReader(socket.getInputStream()))) {
-                
-                // 创建MCP发现工具请求，根据MCP协议格式
-                String requestId = UUID.randomUUID().toString();
-                JsonObject request = new JsonObject();
-                request.addProperty("id", requestId);
-                
-                JsonObject instruction = new JsonObject();
-                instruction.add("content", new JsonObject());
-                request.add("instruction", instruction);
-                
-                // 序列化请求并发送
-                String requestJson = gson.toJson(request);
-                log.info("发送MCP工具发现请求: {}", requestJson);
-                writer.write(requestJson);
-                writer.newLine();
-                writer.flush();
-                
-                log.info("等待MCP服务器响应...");
-                
-                // 读取响应(可能需要多次尝试，因为服务器可能需要一段时间才能响应)
-                String responseLine = null;
-                long startTime = System.currentTimeMillis();
-                long timeoutMillis = config.getTimeout() * 1000L;
-                
-                while (System.currentTimeMillis() - startTime < timeoutMillis) {
-                    if (reader.ready()) {
-                        responseLine = reader.readLine();
-                        break;
+            // 确定JAR文件路径
+            if (config.getServerCommand() != null) {
+                if (config.getServerCommand().endsWith(".jar")) {
+                    // 如果命令直接是JAR文件
+                    jarPath = config.getServerCommand();
+                } else if (config.getServerArgs() != null) {
+                    // 如果命令是java -jar xxx.jar，则从参数中查找JAR文件
+                    for (String arg : config.getServerArgs()) {
+                        if (arg.endsWith(".jar")) {
+                            jarPath = arg;
+                            break;
+                        }
                     }
-                    Thread.sleep(100);  // 等待100毫秒后再次检查
-                }
-                
-                if (responseLine == null) {
-                    log.warn("MCP服务器未返回响应");
-                    return false;
-                }
-                
-                log.info("收到MCP工具发现响应: {}", responseLine);
-                
-                // 解析响应中的工具信息
-                try {
-                    JsonObject responseJson = gson.fromJson(responseLine, JsonObject.class);
-                    
-                    // 检查响应是否包含元数据和工具信息
-                    if (responseJson.has("metadata") && responseJson.getAsJsonObject("metadata").has("tools")) {
-                        JsonArray toolsArray = responseJson.getAsJsonObject("metadata").getAsJsonArray("tools");
-                        
-                        if (toolsArray == null || toolsArray.size() == 0) {
-                            log.info("MCP服务器响应中没有工具");
-                            return false;
-                        }
-                        
-                        List<Tool> tools = new ArrayList<>();
-                        for (int i = 0; i < toolsArray.size(); i++) {
-                            JsonObject toolNode = toolsArray.get(i).getAsJsonObject();
-                            
-                            Tool tool = new Tool();
-                            tool.setName(toolNode.get("name").getAsString());
-                            
-                            // 提取描述（如果有）
-                            if (toolNode.has("description")) {
-                                tool.setDescription(toolNode.get("description").getAsString());
-                            } else {
-                                tool.setDescription("(无描述)");
-                            }
-                            
-                            // 解析参数
-                            if (toolNode.has("parameters")) {
-                                Map<String, Object> parameters = gson.fromJson(
-                                    toolNode.get("parameters"), 
-                                    new TypeToken<Map<String, Object>>(){}.getType()
-                                );
-                                tool.setParameters(parameters);
-                            }
-                            
-                            tools.add(tool);
-                            log.info("发现MCP工具: {} - {}", tool.getName(), tool.getDescription());
-                        }
-                        
-                        if (!tools.isEmpty()) {
-                            log.info("通过MCP协议发现 {} 个工具", tools.size());
-                            config.clearTools();
-                            config.addTools(tools);
-                            return true;
-                        }
-                    } else {
-                        log.debug("MCP响应中未找到工具信息");
-                    }
-                } catch (Exception e) {
-                    log.debug("解析MCP工具响应失败: {}", e.getMessage());
                 }
             }
-        } catch (java.net.ConnectException e) {
-            log.debug("无法连接到MCP服务器: {}", e.getMessage());
-        } catch (java.net.SocketTimeoutException e) {
-            log.debug("连接MCP服务器超时: {}", e.getMessage());
+            
+            if (jarPath == null) {
+                log.warn("未找到JAR文件路径，无法通过反射获取工具列表");
+                return false;
+            }
+            
+            // 使用JAR工具扫描器扫描JAR文件中的工具
+            List<Tool> tools = JarToolScanner.scanTools(jarPath);
+            
+            if (tools.isEmpty()) {
+                log.warn("未从JAR文件中扫描到工具列表");
+                return false;
+            }
+            
+            // 更新工具列表
+            log.info("从JAR文件中扫描到 {} 个工具", tools.size());
+            config.clearTools();
+            config.addTools(tools);
+            return true;
+            
         } catch (Exception e) {
-            log.debug("MCP工具发现失败: {}", e.getMessage());
-        } finally {
-            // 确保socket关闭
-            if (socket != null && !socket.isClosed()) {
-                try {
-                    socket.close();
-                } catch (IOException e) {
-                    log.warn("关闭Socket连接失败: {}", e.getMessage());
-                }
-            }
+            log.error("通过反射获取工具列表失败: {}", e.getMessage());
+            return false;
         }
-        
-        return false;
-    }
-
-    /**
-     * 尝试从Spring Boot应用信息中获取工具列表
-     * 
-     * @param baseUrl 基础URL
-     */
-    private void tryGetToolsFromAppInfo(String baseUrl) {
-        try {
-            // 尝试获取Spring Boot Actuator信息
-            String infoUrl = baseUrl + "actuator/info";
-            log.info("尝试从应用信息端点获取工具: {}", infoUrl);
-            
-            Request request = new Request.Builder()
-                    .url(infoUrl)
-                    .get()
-                    .build();
-            
-            try (Response response = httpClient.newCall(request).execute()) {
-                if (!response.isSuccessful() || response.body() == null) {
-                    log.debug("无法获取应用信息: {}", response.code());
-                    // 如果所有方法都失败，注册默认工具
-                    registerDefaultTools();
-                    return;
-                }
-                
-                String responseBody = response.body().string();
-                log.debug("应用信息响应: {}", responseBody);
-                
-                JsonObject jsonObject = gson.fromJson(responseBody, JsonObject.class);
-                
-                // 检查是否包含AI工具信息
-                if (jsonObject.has("ai") && jsonObject.getAsJsonObject("ai").has("tools")) {
-                    String toolsJson = jsonObject.getAsJsonObject("ai").get("tools").toString();
-                    List<Tool> tools = parseToolsFromResponse(toolsJson);
-                    
-                    if (tools != null && !tools.isEmpty()) {
-                        log.info("从应用信息中获取到 {} 个工具", tools.size());
-                        config.clearTools();
-                        config.addTools(tools);
-                        return;
-                    }
-                }
-                
-                // 如果没有找到工具，注册默认工具
-                registerDefaultTools();
-            }
-        } catch (Exception e) {
-            log.debug("从应用信息获取工具失败: {}", e.getMessage());
-            // 如果失败，注册默认工具
-            registerDefaultTools();
-        }
-    }
-
-    /**
-     * 注册默认工具
-     * 当无法从服务器获取工具时，注册一些基本工具
-     */
-    private void registerDefaultTools() {
-        if (!config.getTools().isEmpty()) {
-            log.info("已存在工具，不注册默认工具");
-            return;
-        }
-        
-        log.info("注册默认工具...");
-        List<Tool> defaultTools = new ArrayList<>();
-        
-        // 创建一个简单的天气工具
-        Tool weatherTool = new Tool();
-        weatherTool.setName("get_weather");
-        weatherTool.setDescription("获取指定城市的天气信息");
-        Map<String, Object> weatherParams = new HashMap<>();
-        
-        Map<String, Object> properties = new HashMap<>();
-        Map<String, Object> cityProperty = new HashMap<>();
-        cityProperty.put("type", "string");
-        cityProperty.put("description", "城市名称");
-        properties.put("city", cityProperty);
-        
-        weatherParams.put("type", "object");
-        weatherParams.put("properties", properties);
-        weatherParams.put("required", Arrays.asList("city"));
-        
-        weatherTool.setParameters(weatherParams);
-        weatherTool.setRequired(true);
-        defaultTools.add(weatherTool);
-        
-        // 创建一个简单的搜索工具
-        Tool searchTool = new Tool();
-        searchTool.setName("search");
-        searchTool.setDescription("在互联网上搜索信息");
-        Map<String, Object> searchParams = new HashMap<>();
-        
-        Map<String, Object> searchProperties = new HashMap<>();
-        Map<String, Object> queryProperty = new HashMap<>();
-        queryProperty.put("type", "string");
-        queryProperty.put("description", "搜索查询");
-        searchProperties.put("query", queryProperty);
-        
-        searchParams.put("type", "object");
-        searchParams.put("properties", searchProperties);
-        searchParams.put("required", Arrays.asList("query"));
-        
-        searchTool.setParameters(searchParams);
-        searchTool.setRequired(false);
-        defaultTools.add(searchTool);
-        
-        // 添加默认工具到配置
-        config.addTools(defaultTools);
-        log.info("已注册 {} 个默认工具", defaultTools.size());
     }
 } 

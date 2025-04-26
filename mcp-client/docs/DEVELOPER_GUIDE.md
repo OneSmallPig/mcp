@@ -43,8 +43,29 @@ SSE（Server-Sent Events）流式通信是本客户端的核心特性，它允�
 为了让大模型能够调用MCP工具，我们实现了以下机制：
 
 1. **工具发现**：客户端可以从服务器自动发现可用工具
+   - **反射扫描方式**：对于JAR类型的服务器，直接通过反射扫描JAR包中的`@Tool`和`@FunctionTool`注解
+   - **MCP协议方式**：通过MCP协议从服务器获取工具列表
+   - **HTTP API方式**：通过HTTP REST API从服务器获取工具列表
+   - **应用信息方式**：从Spring Boot Actuator信息端点获取工具列表
 2. **工具调用**：当收到TOOL_CALL事件时，客户端执行相应的工具
 3. **结果反馈**：将工具执行结果发送回服务器，以便大模型继续生成内容
+
+### 反射扫描JAR文件中的工具
+
+对于JAR类型的MCP服务器，我们提供了一个`JarToolScanner`工具类，用于从JAR文件中扫描工具注解：
+
+```java
+// 使用JarToolScanner扫描JAR文件中的工具
+List<Tool> tools = JarToolScanner.scanTools(jarPath);
+```
+
+这个工具类支持以下功能：
+- 扫描JAR文件中的所有类文件
+- 检查类和方法上的`@Tool`和`@FunctionTool`注解
+- 通过反射获取注解的属性（名称、描述、参数等）
+- 转换为客户端可用的`Tool`对象
+
+这个功能特别适合内部开发的工具JAR包，无需额外开发API接口即可让大模型调用工具。
 
 ## 简化模式
 

@@ -10,15 +10,17 @@ public class Tool {
     private String name;
     private String description;
     private Map<String, Object> parameters;
+    private List<String> requiredParameters;
     private boolean required;
     
     public Tool() {
     }
     
-    public Tool(String name, String description, Map<String, Object> parameters, boolean required) {
+    public Tool(String name, String description, Map<String, Object> parameters, List<String> requiredParameters, boolean required) {
         this.name = name;
         this.description = description;
         this.parameters = parameters;
+        this.requiredParameters = requiredParameters;
         this.required = required;
     }
     
@@ -46,6 +48,14 @@ public class Tool {
         this.parameters = parameters;
     }
     
+    public List<String> getRequiredParameters() {
+        return requiredParameters;
+    }
+    
+    public void setRequiredParameters(List<String> requiredParameters) {
+        this.requiredParameters = requiredParameters;
+    }
+    
     public boolean isRequired() {
         return required;
     }
@@ -60,6 +70,7 @@ public class Tool {
                 "name='" + name + '\'' +
                 ", description='" + description + '\'' +
                 ", parameters=" + parameters +
+                ", requiredParameters=" + requiredParameters +
                 ", required=" + required +
                 '}';
     }

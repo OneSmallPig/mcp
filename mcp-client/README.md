@@ -17,6 +17,7 @@
 - **新增：使用 SSE (Server-Sent Events) 进行流式输出**
 - **新增：提供简化模式，更适合初学者使用**
 - **新增：SSE 模式下同样支持本地 MCP 服务器自动启动**
+- **新增：支持通过反射自动扫描JAR文件中的工具注解**
 
 ## 技术栈
 
@@ -120,6 +121,38 @@ export MCP_SERVER_PATH=api/chat
 ### 工具列表获取
 
 客户端支持多种方式自动从 MCP 服务器获取工具列表，无需手动配置：
+
+#### 通过反射扫描JAR文件中的工具注解 (新增功能)
+
+如果你配置了本地JAR形式的MCP服务器，客户端会自动通过反射机制扫描JAR文件中标记了`@Tool`或`@FunctionTool`注解的类和方法，无需服务器暴露工具列表API接口：
+
+```json
+{
+  "McpServer": {
+    "command": "path/to/your-tool-server.jar"
+  }
+}
+```
+
+或者：
+
+```json
+{
+  "McpServer": {
+    "command": "java",
+    "args": ["-jar", "path/to/your-tool-server.jar"]
+  }
+}
+```
+
+客户端会：
+1. 自动识别JAR文件路径
+2. 使用反射机制扫描JAR中的所有类
+3. 查找带有`@Tool`或`@FunctionTool`注解的类和方法
+4. 自动提取工具名称、描述和参数信息
+5. 注册到工具列表中供大模型调用
+
+这种方式特别适合内部开发的工具JAR包，无需额外开发API接口。
 
 #### MCP原生协议
 

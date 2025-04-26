@@ -15,10 +15,10 @@ mcp:
     
     # MCP服务配置
     server:
-      url: http://localhost:9507
+      url: http://localhost:9509
       path: api/chat
       # 设置为true启用MCP协议
-      useMcpProtocol: true
+      useMcpProtocol: false
       
 # 日志配置
 logging:

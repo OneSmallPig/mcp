@@ -1,6 +1,10 @@
 package com.example.mcp.client.config;
 
+import cn.hutool.core.io.FileUtil;
+import cn.hutool.core.io.resource.ResourceUtil;
+import cn.hutool.core.util.ObjectUtil;
 import com.example.mcp.client.model.Tool;
+import com.example.mcp.client.util.JarToolScanner;
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
@@ -16,9 +20,7 @@ import java.io.InputStream;
 import java.lang.reflect.Type;
 import java.nio.file.Files;
 import java.nio.file.Paths;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import java.util.concurrent.TimeUnit;
 import java.util.function.ToDoubleBiFunction;
 
@@ -39,6 +41,8 @@ public class McpClientConfig {
     private String[] serverArgs;
     private boolean useLocalServer;
     private boolean useMcpProtocol; // 是否使用MCP协议
+    private String serverType; // 服务器类型："jar"或"http"
+    private double temperature = 0.7; // 默认温度值
     
     // 新增SSE相关配置
     private String sseServerUrl;
@@ -141,11 +145,9 @@ public class McpClientConfig {
     }
     
     private void loadExternalConfig() {
-        // 尝试加载几个可能的外部配置文件位置
+        // 尝试加载外部配置文件位置
         String[] possibleLocations = {
-            "./mcp.json",  // 当前目录
-            System.getProperty("user.home") + "/.mcp/mcp.json",  // 用户目录
-            System.getProperty("user.home") + "/.cursor/mcp.json"  // Cursor应用目录
+                ResourceUtil.getResource("").getPath() + "/mcp.json",  // 当前目录
         };
         
         for (String location : possibleLocations) {
@@ -158,39 +160,33 @@ public class McpClientConfig {
                     JsonObject config = gson.fromJson(content, JsonObject.class);
                     
                     // 检查是否有MCP服务器配置
-                    if (config.has("McpDemo") || config.has("McpServer")) {
-                        JsonObject serverConfig = config.has("McpDemo") ? 
-                                config.getAsJsonObject("McpDemo") : 
-                                config.getAsJsonObject("McpServer");
-                        
-                        // 首先直接检查顶层配置
-                        if (serverConfig.has("command")) {
-                            this.serverCommand = serverConfig.get("command").getAsString();
-                            this.useLocalServer = true;
-                            
-                            if (serverConfig.has("args") && serverConfig.get("args").isJsonArray()) {
-                                this.serverArgs = gson.fromJson(serverConfig.get("args"), String[].class);
-                            }
-                            
-                            log.info("加载到本地MCP服务器配置，命令: {}", serverCommand);
-                        } 
-                        // 检查是否有子配置项
-                        else {
-                            // 尝试从子属性中加载配置
-                            for (String key : serverConfig.keySet()) {
-                                if (serverConfig.get(key).isJsonObject()) {
-                                    JsonObject subConfig = serverConfig.getAsJsonObject(key);
-                                    if (subConfig.has("command")) {
-                                        this.serverCommand = subConfig.get("command").getAsString();
-                                        this.useLocalServer = true;
-                                        
-                                        if (subConfig.has("args") && subConfig.get("args").isJsonArray()) {
-                                            this.serverArgs = gson.fromJson(subConfig.get("args"), String[].class);
-                                        }
-                                        
-                                        log.info("从子配置 '{}' 加载到本地MCP服务器配置，命令: {}", key, serverCommand);
-                                        break;  // 找到一个有效配置后停止查找
+                    if (config.has("mcp-servers")) {
+                        JsonObject serverConfig = config.getAsJsonObject("mcp-servers");
+
+                        //判断mcp服务名称
+                        for (String key : serverConfig.keySet()) {
+                            if (serverConfig.get(key).isJsonObject()) {
+                                JsonObject subConfig = serverConfig.getAsJsonObject(key);
+                                if (subConfig.has("command")) {
+                                    this.serverCommand = subConfig.get("command").getAsString();
+                                    this.useLocalServer = true;
+
+                                    if (subConfig.has("args") && subConfig.get("args").isJsonArray()) {
+                                        this.serverArgs = gson.fromJson(subConfig.get("args"), String[].class);
                                     }
+
+                                    // 判断是否为jar类型的服务器
+                                    if (this.serverCommand.equals("java")) {
+//                                        for (String serverArg : serverArgs) {
+//                                            this.serverCommand += " " + serverArg;
+//                                        }
+                                        this.serverType = "jar";
+                                        log.info("检测到jar类型的MCP服务器");
+                                    } else {
+                                        this.serverType = "http";
+                                    }
+
+                                    log.info("加载到本地MCP服务器配置，命令: {}, 类型: {}", serverCommand, this.serverType);
                                 }
                             }
                         }
@@ -215,6 +211,11 @@ public class McpClientConfig {
                         if (serverObj.has("useMcpProtocol")) {
                             this.useMcpProtocol = serverObj.get("useMcpProtocol").getAsBoolean();
                             log.info("从外部配置设置MCP协议: {}", this.useMcpProtocol);
+                        }
+                        
+                        // 如果没有设置服务器类型，默认为http
+                        if (this.serverType == null) {
+                            this.serverType = "http";
                         }
                         
                         log.info("从外部配置加载服务器URL: {}", serverUrl);
@@ -262,56 +263,52 @@ public class McpClientConfig {
     
     // Override configuration with environment variables if they exist
     public void overrideWithEnvVars() {
-        String envApiKey = System.getenv("VOLCANO_API_KEY");
-        if (envApiKey != null && !envApiKey.isEmpty()) {
-            this.apiKey = envApiKey;
+        // 读取环境变量
+        String apiKey = System.getenv("MCP_API_KEY");
+        if (apiKey != null && !apiKey.isEmpty()) {
+            this.apiKey = apiKey;
         }
         
-        String envEndpoint = System.getenv("VOLCANO_ENDPOINT");
-        if (envEndpoint != null && !envEndpoint.isEmpty()) {
-            this.endpoint = envEndpoint;
+        String endpoint = System.getenv("MCP_ENDPOINT");
+        if (endpoint != null && !endpoint.isEmpty()) {
+            this.endpoint = endpoint;
         }
         
-        String envModel = System.getenv("VOLCANO_MODEL");
-        if (envModel != null && !envModel.isEmpty()) {
-            this.model = envModel;
+        String model = System.getenv("MCP_MODEL");
+        if (model != null && !model.isEmpty()) {
+            this.model = model;
         }
         
-        String envServerUrl = System.getenv("MCP_SERVER_URL");
-        if (envServerUrl != null && !envServerUrl.isEmpty()) {
-            this.serverUrl = envServerUrl;
+        String serverUrl = System.getenv("MCP_SERVER_URL");
+        if (serverUrl != null && !serverUrl.isEmpty()) {
+            this.serverUrl = serverUrl;
         }
         
-        String envServerPath = System.getenv("MCP_SERVER_PATH");
-        if (envServerPath != null && !envServerPath.isEmpty()) {
-            this.serverPath = envServerPath;
+        String serverPath = System.getenv("MCP_SERVER_PATH");
+        if (serverPath != null && !serverPath.isEmpty()) {
+            this.serverPath = serverPath;
         }
         
-        // 从环境变量加载是否使用MCP协议
-        String envUseMcpProtocol = System.getenv("MCP_USE_PROTOCOL");
-        if (envUseMcpProtocol != null && !envUseMcpProtocol.isEmpty()) {
-            this.useMcpProtocol = Boolean.parseBoolean(envUseMcpProtocol);
-            log.info("从环境变量设置MCP协议: {}", this.useMcpProtocol);
+        String useMcpProtocolStr = System.getenv("MCP_USE_PROTOCOL");
+        if (useMcpProtocolStr != null && !useMcpProtocolStr.isEmpty()) {
+            this.useMcpProtocol = Boolean.parseBoolean(useMcpProtocolStr);
         }
         
-        // 尝试从环境变量加载SSE相关配置
+        // SSE环境变量
         String sseServerUrl = System.getenv("MCP_SSE_SERVER_URL");
         if (sseServerUrl != null && !sseServerUrl.isEmpty()) {
             this.sseServerUrl = sseServerUrl;
             this.useSse = true;
-            log.info("从环境变量加载SSE服务器URL: {}", sseServerUrl);
         }
         
         String sseServerPath = System.getenv("MCP_SSE_SERVER_PATH");
         if (sseServerPath != null && !sseServerPath.isEmpty()) {
             this.sseServerPath = sseServerPath;
-            log.info("从环境变量加载SSE服务器路径: {}", sseServerPath);
         }
         
-        String useSse = System.getenv("MCP_USE_SSE");
-        if (useSse != null && !useSse.isEmpty()) {
-            this.useSse = Boolean.parseBoolean(useSse);
-            log.info("从环境变量加载SSE使用设置: {}", this.useSse);
+        String useSseStr = System.getenv("MCP_USE_SSE");
+        if (useSseStr != null && !useSseStr.isEmpty()) {
+            this.useSse = Boolean.parseBoolean(useSseStr);
         }
     }
 
@@ -339,9 +336,8 @@ public class McpClientConfig {
      * 如果是本地服务器但没有设置URL，则设置默认的本地服务器URL
      */
     public void setDefaultLocalServerUrl() {
-        //todo 这里我需要进行配置判断，获取jar包的启动端口
         if (this.serverUrl == null || this.serverUrl.isEmpty()) {
-            this.serverUrl = "http://localhost:9507";
+            this.serverUrl = "http://localhost:8080";
             log.info("设置默认本地服务器URL: {}", this.serverUrl);
         }
         
@@ -460,8 +456,8 @@ public class McpClientConfig {
 
     // 新增SSE相关配置的getter和setter
     public String getSseServerUrl() {
-        // 如果未配置SSE服务器URL，则使用普通服务器URL
-        return sseServerUrl != null ? sseServerUrl : serverUrl;
+        // 如果没有专门设置SSE服务器URL，则使用通用服务器URL
+        return sseServerUrl != null && !sseServerUrl.isEmpty() ? sseServerUrl : serverUrl;
     }
     
     public void setSseServerUrl(String sseServerUrl) {
@@ -469,8 +465,8 @@ public class McpClientConfig {
     }
     
     public String getSseServerPath() {
-        // 如果未配置SSE服务器路径，则使用默认路径
-        return sseServerPath != null ? sseServerPath : "api/chat/stream";
+        // 如果没有专门设置SSE服务器路径，使用默认值"sse"
+        return sseServerPath != null && !sseServerPath.isEmpty() ? sseServerPath : "sse";
     }
     
     public void setSseServerPath(String sseServerPath) {
@@ -483,5 +479,17 @@ public class McpClientConfig {
     
     public void setUseSse(boolean useSse) {
         this.useSse = useSse;
+    }
+
+    public String getServerType() {
+        return serverType;
+    }
+    
+    public double getTemperature() {
+        return temperature;
+    }
+    
+    public void setTemperature(double temperature) {
+        this.temperature = temperature;
     }
 } 
