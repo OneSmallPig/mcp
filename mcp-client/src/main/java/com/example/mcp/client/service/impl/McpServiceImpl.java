@@ -8,7 +8,7 @@ import com.example.mcp.client.model.Tool;
 import com.example.mcp.client.model.ToolCall;
 import com.example.mcp.client.service.McpService;
 import com.example.mcp.client.service.VolcanoDeepSeekClient;
-import com.example.mcp.client.util.JarToolScanner;
+import com.example.mcp.client.util.ToolFetcher;
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
@@ -69,10 +69,6 @@ public class McpServiceImpl implements McpService {
                 .build();
         
         this.gson = new Gson();
-        
-        // 首先判断是否为JAR形式的服务器
-        boolean isJarServer = isJarServer();
-        log.info("服务器类型检测: {}", isJarServer ? "JAR形式服务器" : "非JAR形式服务器");
         
         // 如果配置了本地服务器，则启动它
         if (config.isUseLocalServer() && config.getServerCommand() != null) {
@@ -791,71 +787,31 @@ public class McpServiceImpl implements McpService {
     }
     
     /**
-     * 从MCP服务器获取可用工具列表
+     * 从MCP服务器获取工具列表
      */
     private void fetchToolsFromMcpServer() {
         try {
             log.info("尝试从MCP服务器获取可用工具列表...");
             
-            // 构建请求URL
+            // 使用ToolFetcher直接获取工具列表
+            List<Tool> tools = ToolFetcher.fetchTools();
+            
+            if (!tools.isEmpty()) {
+                log.info("从服务器API获取到 {} 个工具", tools.size());
+                config.clearTools();
+                config.addTools(tools);
+                return;
+            }
+            
+            // 如果ToolFetcher未获取到工具，尝试旧的替代端点
             String baseUrl = config.getServerUrl();
             if (!baseUrl.endsWith("/")) {
                 baseUrl += "/";
             }
             
-            // MCP服务器通常在/tools端点提供工具列表
-            String toolsEndpoint = baseUrl + "tools";
-            log.info("请求工具列表端点: {}", toolsEndpoint);
-            
-            // 构建请求
-            Request httpRequest = new Request.Builder()
-                    .url(toolsEndpoint)
-                    .get()
-                    .build();
-            
-            // 发送请求
-            try (Response response = httpClient.newCall(httpRequest).execute()) {
-                // 检查响应
-                if (!response.isSuccessful()) {
-                    log.warn("获取MCP服务器工具列表失败: {} {}", response.code(), response.message());
-                    // 尝试备用端点
-                    fetchToolsFromAlternativeEndpoint(baseUrl);
-                    return;
-                }
-                
-                // 解析响应
-                if (response.body() != null) {
-                    String responseBody = response.body().string();
-                    log.debug("收到MCP服务器工具列表响应: {}", responseBody);
-                    
-                    try {
-                        // 解析工具列表
-                        Type toolListType = new TypeToken<List<Tool>>(){}.getType();
-                        List<Tool> serverTools = gson.fromJson(responseBody, toolListType);
-                        
-                        if (serverTools != null && !serverTools.isEmpty()) {
-                            log.info("从MCP服务器获取到 {} 个可用工具", serverTools.size());
-                            
-                            // 清除现有工具并添加服务器提供的工具
-                            config.clearTools();
-                            config.addTools(serverTools);
-                            
-                            // 输出获取到的工具信息
-                            for (Tool tool : serverTools) {
-                                log.info("服务器工具: {} - {}", tool.getName(), tool.getDescription());
-                            }
-                        } else {
-                            log.info("MCP服务器未提供可用工具，尝试备用端点");
-                            fetchToolsFromAlternativeEndpoint(baseUrl);
-                        }
-                    } catch (Exception e) {
-                        log.error("解析MCP服务器工具列表失败", e);
-                        fetchToolsFromAlternativeEndpoint(baseUrl);
-                    }
-                }
-            }
+            fetchToolsFromAlternativeEndpoint(baseUrl);
         } catch (Exception e) {
-            log.error("获取MCP服务器工具列表失败", e);
+            log.error("从MCP服务器获取工具列表失败: {}", e.getMessage());
         }
     }
     
@@ -948,87 +904,11 @@ public class McpServiceImpl implements McpService {
     }
 
     /**
-     * 判断是否为JAR形式的服务器
-     * 
-     * @return 是否为JAR服务器
-     */
-    private boolean isJarServer() {
-        // 检查命令本身是否以.jar结尾
-        if (config.getServerCommand() != null && config.getServerCommand().toLowerCase().endsWith(".jar")) {
-            log.info("检测到JAR服务器: 命令直接引用JAR文件 - {}", config.getServerCommand());
-            return true;
-        }
-        
-        // 检查命令参数是否包含.jar
-        String[] args = config.getServerArgs();
-        if (args != null && args.length > 0) {
-            for (String arg : args) {
-                if (arg != null && arg.toLowerCase().endsWith(".jar")) {
-                    log.info("检测到JAR服务器: 参数中包含JAR文件 - {}", arg);
-                    return true;
-                }
-            }
-        }
-        
-        // 检查命令是否为java且参数中包含-jar
-        if (config.getServerCommand() != null && "java".equals(config.getServerCommand()) && args != null && args.length > 1) {
-            for (int i = 0; i < args.length - 1; i++) {
-                if ("-jar".equals(args[i])) {
-                    log.info("检测到JAR服务器: java -jar 命令");
-                    return true;
-                }
-            }
-        }
-        
-        log.info("未检测到JAR形式服务器，命令: {}, 参数: {}", 
-                config.getServerCommand(), 
-                args != null ? Arrays.toString(args) : "无");
-        return false;
-    }
-
-    /**
-     * 获取JAR文件路径
-     * 
-     * @return JAR文件路径
-     */
-    private String getJarPath() {
-        // 如果命令本身是JAR文件
-        if (config.getServerCommand() != null && config.getServerCommand().toLowerCase().endsWith(".jar")) {
-            log.info("找到JAR路径(命令): {}", config.getServerCommand());
-            return config.getServerCommand();
-        }
-        
-        // 检查参数中是否有JAR文件
-        String[] args = config.getServerArgs();
-        if (args != null && args.length > 0) {
-            for (String arg : args) {
-                if (arg != null && arg.toLowerCase().endsWith(".jar")) {
-                    log.info("找到JAR路径(参数): {}", arg);
-                    return arg;
-                }
-            }
-            
-            // 检查是否有-jar参数后跟着JAR路径
-            if (config.getServerCommand() != null && "java".equals(config.getServerCommand())) {
-                for (int i = 0; i < args.length - 1; i++) {
-                    if ("-jar".equals(args[i]) && args[i + 1] != null) {
-                        log.info("找到JAR路径(java -jar参数): {}", args[i + 1]);
-                        return args[i + 1];
-                    }
-                }
-            }
-        }
-        
-        log.warn("未找到有效的JAR文件路径");
-        return null;
-    }
-
-    /**
-     * 从已启动的本地JAR服务器获取工具列表
+     * 从已启动的本地服务器获取工具列表
      */
     private void fetchToolsFromRunningServer() {
         try {
-            log.info("尝试从已启动的本地JAR服务器获取工具列表...");
+            log.info("尝试从已启动的本地服务器获取工具列表...");
             
             // 检查服务器URL，应该已经设置了默认值
             String baseUrl = config.getServerUrl();
@@ -1037,66 +917,18 @@ public class McpServiceImpl implements McpService {
                 return;
             }
             
-            // 检查服务器类型，如果是jar类型，尝试通过反射获取工具
-            if ("jar".equals(config.getServerType())) {
-                if (fetchToolsFromJarFile()) {
-                    log.info("已通过反射从JAR文件获取工具列表");
-                    return;
-                }
+            // 使用ToolFetcher从服务器API获取工具列表
+            List<Tool> tools = ToolFetcher.fetchTools();
+            
+            if (!tools.isEmpty()) {
+                log.info("从服务器API获取到 {} 个工具", tools.size());
+                config.clearTools();
+                config.addTools(tools);
+            } else {
+                log.warn("未从服务器API获取到工具列表");
             }
         } catch (Exception e) {
-            log.error("从已启动的JAR服务器获取工具列表失败: {}", e.getMessage());
-        }
-    }
-
-    /**
-     * 通过反射从JAR文件中获取工具列表
-     * @return 是否成功获取工具列表
-     */
-    private boolean fetchToolsFromJarFile() {
-        try {
-            log.info("尝试通过反射从JAR文件中获取工具列表...");
-            
-            String jarPath = null;
-            
-            // 确定JAR文件路径
-            if (config.getServerCommand() != null) {
-                if (config.getServerCommand().endsWith(".jar")) {
-                    // 如果命令直接是JAR文件
-                    jarPath = config.getServerCommand();
-                } else if (config.getServerArgs() != null) {
-                    // 如果命令是java -jar xxx.jar，则从参数中查找JAR文件
-                    for (String arg : config.getServerArgs()) {
-                        if (arg.endsWith(".jar")) {
-                            jarPath = arg;
-                            break;
-                        }
-                    }
-                }
-            }
-            
-            if (jarPath == null) {
-                log.warn("未找到JAR文件路径，无法通过反射获取工具列表");
-                return false;
-            }
-            
-            // 使用JAR工具扫描器扫描JAR文件中的工具
-            List<Tool> tools = JarToolScanner.scanTools(jarPath);
-            
-            if (tools.isEmpty()) {
-                log.warn("未从JAR文件中扫描到工具列表");
-                return false;
-            }
-            
-            // 更新工具列表
-            log.info("从JAR文件中扫描到 {} 个工具", tools.size());
-            config.clearTools();
-            config.addTools(tools);
-            return true;
-            
-        } catch (Exception e) {
-            log.error("通过反射获取工具列表失败: {}", e.getMessage());
-            return false;
+            log.error("从服务器获取工具列表失败: {}", e.getMessage());
         }
     }
 } 

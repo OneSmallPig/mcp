@@ -55,10 +55,8 @@ public class McpClientApplication {
                 }
                 System.out.println("  - " + tool.getName() + paramInfo + ": " + tool.getDescription());
             }
-            System.out.println();
         } else {
             System.out.println("未加载任何MCP工具。如果您配置了MCP服务器但未显示工具，请检查服务器是否正确提供工具列表API。");
-            System.out.println();
         }
         
         if (args.length > 0) {

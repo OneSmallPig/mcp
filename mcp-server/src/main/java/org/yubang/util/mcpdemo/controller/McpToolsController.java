@@ -3,6 +3,7 @@ package org.yubang.util.mcpdemo.controller;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
@@ -33,11 +34,13 @@ public class McpToolsController {
 
     private final ApiService apiService;
     private final DatabaseService databaseService;
-    private final ExcelExportService excelExportService = new ExcelExportService(new DatabaseService());
+    private final ExcelExportService excelExportService;
 
-    public McpToolsController(ApiService apiService, DatabaseService databaseService) {
+    @Autowired
+    public McpToolsController(ApiService apiService, DatabaseService databaseService, ExcelExportService excelExportService) {
         this.apiService = apiService;
         this.databaseService = databaseService;
+        this.excelExportService = excelExportService;
     }
 
     /**
@@ -90,7 +93,7 @@ public class McpToolsController {
     public List<ToolInfo> getSimpleToolList() {
         List<ToolInfo> toolInfoList = new ArrayList<>();
         
-        Object[] services = {apiService, databaseService};
+        Object[] services = {apiService, databaseService, excelExportService};
         
         for (Object service : services) {
             for (Method method : service.getClass().getMethods()) {

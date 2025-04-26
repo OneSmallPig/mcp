@@ -4,6 +4,7 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.yubang.util.mcpdemo.service.ApiService;
 import org.yubang.util.mcpdemo.service.DatabaseService;
+import org.yubang.util.mcpdemo.service.ExcelExportService;
 
 import java.util.Arrays;
 import java.util.List;
@@ -19,10 +20,11 @@ public class ToolConfiguration {
      * 收集所有工具服务
      * @param apiService API服务
      * @param databaseService 数据库服务
+     * @param excelExportService Excel导出服务
      * @return 工具服务列表
      */
     @Bean
-    public List<Object> toolServices(ApiService apiService, DatabaseService databaseService) {
-        return Arrays.asList(apiService, databaseService);
+    public List<Object> toolServices(ApiService apiService, DatabaseService databaseService, ExcelExportService excelExportService) {
+        return Arrays.asList(apiService, databaseService, excelExportService);
     }
 } 
