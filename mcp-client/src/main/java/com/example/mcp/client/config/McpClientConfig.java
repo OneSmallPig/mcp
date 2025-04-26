@@ -39,6 +39,12 @@ public class McpClientConfig {
     private String[] serverArgs;
     private boolean useLocalServer;
     private boolean useMcpProtocol; // 是否使用MCP协议
+    
+    // 新增SSE相关配置
+    private String sseServerUrl;
+    private String sseServerPath;
+    private boolean useSse = false;
+    
     private List<Tool> tools = new ArrayList<>();
     
     private static McpClientConfig instance;
@@ -214,6 +220,23 @@ public class McpClientConfig {
                         log.info("从外部配置加载服务器URL: {}", serverUrl);
                     }
                     
+                    // 检查是否有SSE配置
+                    if (config.has("sse")) {
+                        JsonObject sseObj = config.getAsJsonObject("sse");
+                        if (sseObj.has("serverUrl")) {
+                            this.sseServerUrl = sseObj.get("serverUrl").getAsString();
+                            log.info("从外部配置加载SSE服务器URL: {}", this.sseServerUrl);
+                        }
+                        if (sseObj.has("serverPath")) {
+                            this.sseServerPath = sseObj.get("serverPath").getAsString();
+                            log.info("从外部配置加载SSE服务器路径: {}", this.sseServerPath);
+                        }
+                        if (sseObj.has("useSse")) {
+                            this.useSse = sseObj.get("useSse").getAsBoolean();
+                            log.info("从外部配置加载SSE使用设置: {}", this.useSse);
+                        }
+                    }
+                    
                     // 加载工具配置
                     if (config.has("tools") && config.get("tools").isJsonArray()) {
                         JsonArray toolsArray = config.getAsJsonArray("tools");
@@ -270,6 +293,26 @@ public class McpClientConfig {
             this.useMcpProtocol = Boolean.parseBoolean(envUseMcpProtocol);
             log.info("从环境变量设置MCP协议: {}", this.useMcpProtocol);
         }
+        
+        // 尝试从环境变量加载SSE相关配置
+        String sseServerUrl = System.getenv("MCP_SSE_SERVER_URL");
+        if (sseServerUrl != null && !sseServerUrl.isEmpty()) {
+            this.sseServerUrl = sseServerUrl;
+            this.useSse = true;
+            log.info("从环境变量加载SSE服务器URL: {}", sseServerUrl);
+        }
+        
+        String sseServerPath = System.getenv("MCP_SSE_SERVER_PATH");
+        if (sseServerPath != null && !sseServerPath.isEmpty()) {
+            this.sseServerPath = sseServerPath;
+            log.info("从环境变量加载SSE服务器路径: {}", sseServerPath);
+        }
+        
+        String useSse = System.getenv("MCP_USE_SSE");
+        if (useSse != null && !useSse.isEmpty()) {
+            this.useSse = Boolean.parseBoolean(useSse);
+            log.info("从环境变量加载SSE使用设置: {}", this.useSse);
+        }
     }
 
     /**
@@ -300,6 +343,15 @@ public class McpClientConfig {
         if (this.serverUrl == null || this.serverUrl.isEmpty()) {
             this.serverUrl = "http://localhost:9507";
             log.info("设置默认本地服务器URL: {}", this.serverUrl);
+        }
+        
+        // 自动设置SSE服务器URL为同一本地服务器
+        if (this.isUseLocalServer() && (this.sseServerUrl == null || this.sseServerUrl.isEmpty())) {
+            this.sseServerUrl = this.serverUrl;
+            this.sseServerPath = this.sseServerPath != null ? this.sseServerPath : "api/chat/stream";
+            this.useSse = true;
+            log.info("检测到本地MCP服务器，自动设置SSE服务器URL: {}", this.sseServerUrl);
+            log.info("SSE服务器路径: {}", this.sseServerPath);
         }
     }
 
@@ -404,5 +456,32 @@ public class McpClientConfig {
     
     public void setUseMcpProtocol(boolean useMcpProtocol) {
         this.useMcpProtocol = useMcpProtocol;
+    }
+
+    // 新增SSE相关配置的getter和setter
+    public String getSseServerUrl() {
+        // 如果未配置SSE服务器URL，则使用普通服务器URL
+        return sseServerUrl != null ? sseServerUrl : serverUrl;
+    }
+    
+    public void setSseServerUrl(String sseServerUrl) {
+        this.sseServerUrl = sseServerUrl;
+    }
+    
+    public String getSseServerPath() {
+        // 如果未配置SSE服务器路径，则使用默认路径
+        return sseServerPath != null ? sseServerPath : "api/chat/stream";
+    }
+    
+    public void setSseServerPath(String sseServerPath) {
+        this.sseServerPath = sseServerPath;
+    }
+    
+    public boolean isUseSse() {
+        return useSse;
+    }
+    
+    public void setUseSse(boolean useSse) {
+        this.useSse = useSse;
     }
 } 

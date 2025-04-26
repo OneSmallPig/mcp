@@ -8,6 +8,9 @@ import com.example.mcp.client.model.Tool;
 import com.example.mcp.client.model.ToolCall;
 import com.example.mcp.client.service.McpService;
 import com.example.mcp.client.service.McpServiceImpl;
+import com.example.mcp.client.service.McpSseService;
+import com.example.mcp.client.service.McpSseServiceImpl;
+import com.example.mcp.client.service.SimpleSseEventListener;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import org.slf4j.Logger;
@@ -28,11 +31,23 @@ public class McpClientApplication {
     public static void main(String[] args) {
         log.info("启动MCP客户端应用程序");
         
-        // 创建MCP服务
-        McpService mcpService = new McpServiceImpl();
+        // 创建配置
+        McpClientConfig config = McpClientConfig.getInstance();
+        
+        // 检查本地MCP服务器配置
+        if (config.isUseLocalServer()) {
+            // 如果配置了本地服务器但没有指定URL，设置默认URL
+            config.setDefaultLocalServerUrl();
+            
+            log.info("准备启动本地MCP服务: {}", config.getServerCommand());
+            
+            // 此处可以添加启动本地MCP服务器的逻辑
+            // 这部分逻辑通常会在McpServiceImpl中实现
+            // 暂时作为占位符
+        }
         
         // 输出可用工具信息
-        List<Tool> tools = McpClientConfig.getInstance().getTools();
+        List<Tool> tools = config.getTools();
         if (!tools.isEmpty()) {
             System.out.println("已加载 " + tools.size() + " 个MCP工具:");
             System.out.println("（这些工具可能来自配置文件或从MCP服务器自动获取）");
@@ -49,12 +64,61 @@ public class McpClientApplication {
             System.out.println();
         }
         
-        if (args.length > 0 && args[0].equals("--interactive")) {
-            // 交互模式
-            runInteractiveMode(mcpService);
+        if (args.length > 0) {
+            if (args[0].equals("--interactive")) {
+                // 交互模式 - 使用标准MCP服务，会自动启动本地服务器
+                runInteractiveMode(new McpServiceImpl());
+            } else if (args[0].equals("--sse")) {
+                // SSE交互模式 - 需要先确保本地服务器已启动
+                ensureLocalServerStarted();
+                runSseInteractiveMode(new McpSseServiceImpl());
+            } else if (args[0].equals("--simple")) {
+                // 简化SSE模式 - 也需要确保本地服务器已启动
+                ensureLocalServerStarted();
+                runSimpleMode();
+            }
         } else {
-            // 演示模式
-            runDemoMode(mcpService);
+            // 演示模式 - 使用标准MCP服务，会自动启动本地服务器
+            runDemoMode(new McpServiceImpl());
+        }
+    }
+    
+    /**
+     * 确保本地MCP服务器已启动
+     */
+    private static void ensureLocalServerStarted() {
+        McpClientConfig config = McpClientConfig.getInstance();
+        if (config.isUseLocalServer() && config.getServerCommand() != null) {
+            try {
+                log.info("正在为SSE模式启动本地MCP服务器...");
+                
+                // 创建临时的McpService实例来启动本地服务器
+                McpService tempService = new McpServiceImpl();
+                
+                // 发送一个简单请求以触发服务器启动
+                ChatRequest request = new ChatRequest();
+                List<Message> messages = new ArrayList<>();
+                messages.add(new Message("system", "test"));
+                request.setMessages(messages);
+                
+                try {
+                    tempService.sendChatRequest(request);
+                    log.info("本地MCP服务器已成功启动");
+                } catch (Exception e) {
+                    log.warn("测试请求失败，但本地服务器可能已启动: {}", e.getMessage());
+                }
+                
+                // 等待服务器完全启动
+                try {
+                    Thread.sleep(2000);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+                
+            } catch (Exception e) {
+                log.error("启动本地MCP服务器失败: {}", e.getMessage());
+                System.err.println("警告: 启动本地MCP服务器失败，SSE模式可能无法正常工作");
+            }
         }
     }
     
@@ -129,6 +193,151 @@ public class McpClientApplication {
         
         System.out.println("感谢使用MCP客户端，再见！");
         scanner.close();
+    }
+    
+    /**
+     * 运行SSE交互模式
+     * 
+     * @param mcpSseService MCP SSE服务
+     */
+    private static void runSseInteractiveMode(McpSseService mcpSseService) {
+        Scanner scanner = new Scanner(System.in);
+        List<Message> messages = new ArrayList<>();
+        
+        System.out.println("欢迎使用MCP客户端（SSE流式模式）！输入'exit'退出。");
+        
+        // 添加系统提示
+        messages.add(new Message("system", "You are a helpful assistant. When user requests a tool function, always try to call the available tools to satisfy their request."));
+        
+        while (true) {
+            System.out.print("\nUser: ");
+            String input = scanner.nextLine().trim();
+            
+            if ("exit".equalsIgnoreCase(input)) {
+                break;
+            }
+            
+            // 添加用户消息
+            messages.add(new Message("user", input));
+            
+            try {
+                // 创建事件监听器
+                SimpleSseEventListener listener = new SimpleSseEventListener() {
+                    StringBuilder currentResponse = new StringBuilder();
+                    
+                    @Override
+                    public void onTextChunk(String text) {
+                        System.out.print(text);
+                        currentResponse.append(text);
+                    }
+                    
+                    @Override
+                    public void onToolCall(ToolCall toolCall) {
+                        System.out.println("\n\n[调用工具: " + toolCall.getFunction() + "]");
+                        System.out.println("参数: " + gson.toJson(toolCall.getArguments()));
+                    }
+                    
+                    @Override
+                    public void onToolResult(String function, String result) {
+                        System.out.println("[工具结果: " + function + "]");
+                        System.out.println(result);
+                    }
+                    
+                    @Override
+                    public void onComplete() {
+                        System.out.println("\n");
+                        // 将助手回复添加到历史
+                        messages.add(new Message("assistant", currentResponse.toString()));
+                    }
+                    
+                    @Override
+                    public void onError(Throwable t) {
+                        System.err.println("错误: " + t.getMessage());
+                    }
+                };
+                
+                // 发送请求
+                System.out.println("\nAssistant: ");
+                mcpSseService.sendPrompt(new ArrayList<>(messages), input, listener);
+                
+                // 等待响应完成，防止重叠输出
+                try {
+                    Thread.sleep(1000);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+                
+            } catch (IOException e) {
+                System.err.println("发送请求失败: " + e.getMessage());
+                log.error("发送请求失败", e);
+            }
+        }
+        
+        System.out.println("感谢使用MCP客户端，再见！");
+        scanner.close();
+        mcpSseService.close();
+    }
+    
+    /**
+     * 运行简化模式 (最适合初中生使用)
+     */
+    private static void runSimpleMode() {
+        SimpleMcpClient client = new SimpleMcpClient();
+        Scanner scanner = new Scanner(System.in);
+        
+        System.out.println("欢迎使用简易AI助手！输入'exit'退出。");
+        System.out.println("我可以帮你做很多事情，包括计算、查询天气、生成图片等，快来和我聊天吧！");
+        
+        while (true) {
+            System.out.print("\n你: ");
+            String input = scanner.nextLine().trim();
+            
+            if ("exit".equalsIgnoreCase(input)) {
+                break;
+            }
+            
+            System.out.print("\nAI: ");
+            
+            client.chat(input, new SimpleMcpClient.ChatCallback() {
+                @Override
+                public void onAiResponse(String text) {
+                    System.out.print(text); // 实时打印AI回复
+                }
+                
+                @Override
+                public void onToolUse(String toolName, String parameters) {
+                    System.out.println("\n\n[AI正在使用" + toolName + "工具]");
+                    System.out.println("[参数: " + parameters + "]");
+                }
+                
+                @Override
+                public void onToolResult(String toolName, String result) {
+                    System.out.println("[" + toolName + "工具返回结果]");
+                    System.out.println(result);
+                }
+                
+                @Override
+                public void onFinished() {
+                    System.out.println();
+                }
+                
+                @Override
+                public void onError(String errorMessage) {
+                    System.out.println("\n发生错误: " + errorMessage);
+                }
+            });
+            
+            // 等待响应完成，防止重叠输出
+            try {
+                Thread.sleep(1000);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
+        
+        System.out.println("感谢使用AI助手，再见！");
+        scanner.close();
+        client.close();
     }
     
     /**

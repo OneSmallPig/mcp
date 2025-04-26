@@ -14,6 +14,9 @@
 - 提供交互式使用模式和演示模式
 - 完整的日志记录和错误处理
 - 支持配置文件和环境变量配置
+- **新增：使用 SSE (Server-Sent Events) 进行流式输出**
+- **新增：提供简化模式，更适合初学者使用**
+- **新增：SSE 模式下同样支持本地 MCP 服务器自动启动**
 
 ## 技术栈
 
@@ -178,6 +181,60 @@ mvn clean package
 # 例如: target/mcp-client-1.0-SNAPSHOT-jar-with-dependencies.jar
 ```
 
+### SSE服务器配置
+
+有多种方式配置SSE服务器：
+
+1. **在配置文件中配置**：修改 `src/main/resources/application.yml` 文件
+
+```yaml
+mcp:
+  client:
+    sse:
+      serverUrl: http://your-sse-server-address:8080
+      serverPath: api/chat/stream
+      useSse: true
+```
+
+2. **在mcp.json中配置**：
+
+```json
+{
+  "server": {
+    "url": "http://your-mcp-server-address:8080",
+    "path": "api/chat"
+  },
+  "sse": {
+    "serverUrl": "http://your-sse-server-address:8080",
+    "serverPath": "api/chat/stream",
+    "useSse": true
+  }
+}
+```
+
+3. **通过环境变量配置**：
+
+```bash
+export MCP_SSE_SERVER_URL=http://your-sse-server-address:8080
+export MCP_SSE_SERVER_PATH=api/chat/stream
+export MCP_USE_SSE=true
+```
+
+4. **本地MCP服务器自动配置**：
+
+如果您在 `mcp.json` 中配置了本地MCP服务器，系统将自动配置SSE服务器使用同一个本地服务：
+
+```json
+{
+  "McpServer": {
+    "command": "java",
+    "args": ["-jar", "path/to/mcp-server.jar"]
+  }
+}
+```
+
+在这种情况下，SSE服务器的URL会自动设置为与MCP服务器相同，默认SSE路径为"api/chat/stream"。
+
 ### 运行客户端
 
 ```bash
@@ -186,6 +243,12 @@ java -jar target/mcp-client-1.0-SNAPSHOT-jar-with-dependencies.jar
 
 # 交互模式
 java -jar target/mcp-client-1.0-SNAPSHOT-jar-with-dependencies.jar --interactive
+
+# SSE流式模式（新增）
+java -jar target/mcp-client-1.0-SNAPSHOT-jar-with-dependencies.jar --sse
+
+# 简化模式（适合初学者，新增）
+java -jar target/mcp-client-1.0-SNAPSHOT-jar-with-dependencies.jar --simple
 ```
 
 ## 客户端交互
@@ -194,15 +257,17 @@ java -jar target/mcp-client-1.0-SNAPSHOT-jar-with-dependencies.jar --interactive
 
 当以交互模式启动客户端时，你可以与 AI 进行对话：
 
-1. 启动客户端：
-
-```bash
-java -jar target/mcp-client-1.0-SNAPSHOT-jar-with-dependencies.jar --interactive
-```
-
-2. 输入你的问题或指令：
-
 ```
 欢迎使用MCP客户端！输入'exit'退出。
 
 User: 你好，请介绍一下自己。 
+```
+
+### SSE流式模式（新增）
+
+SSE模式下，AI回复会实时显示在屏幕上，工具调用也会实时执行和反馈结果：
+
+```
+欢迎使用MCP客户端（SSE流式模式）！输入'exit'退出。
+
+User: 请帮我计算一下23乘以45
