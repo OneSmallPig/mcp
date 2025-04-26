@@ -1,0 +1,29 @@
+mcp:
+  client:
+    # 火山引擎API配置
+    volcano:
+      # API密钥信息
+      apiKey: af65b0b7-e01d-4fd3-8a64-04db65f2b730
+      # 服务接口配置
+      deepseek:
+        endpoint: https://ark.cn-beijing.volces.com/api/v3/chat/completions
+        model: deepseek-r1-250120
+      # 请求配置
+      request:
+        timeout: 60
+        retries: 3
+    
+    # MCP服务配置
+    server:
+      url: http://localhost:9507
+      path: api/chat
+      # 设置为true启用MCP协议
+      useMcpProtocol: true
+      
+# 日志配置
+logging:
+  level:
+    root: INFO
+    com.example.mcp: DEBUG
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n" 

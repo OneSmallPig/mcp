@@ -1,0 +1,11 @@
+{
+  "McpServer": {
+    "demo":{
+      "command" : "java",
+      "args":[
+        "-jar",
+        "/Users/onesmallpig/Documents/AIWorkSpace/mcp/mcp-demo/target/mcp-demo-0.0.1-SNAPSHOT.jar"
+      ]
+    }
+  }
+}
