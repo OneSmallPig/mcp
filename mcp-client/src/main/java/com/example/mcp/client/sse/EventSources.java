@@ -49,7 +49,9 @@ public final class EventSources {
         @Override
         public void connect() {
             Request request = this.request.newBuilder()
-                    .header("Accept", "text/event-stream")
+                    .header("Accept", "text/event-stream;charset=UTF-8")
+                    .header("Accept-Charset", "UTF-8")
+                    .header("Cache-Control", "no-cache")
                     .build();
             
             call = client.newCall(request);
@@ -87,6 +89,13 @@ public final class EventSources {
         private void processEvents(Response response) throws IOException {
             if (response.body() == null) {
                 return;
+            }
+            
+            // 检查响应头中的Content-Type是否包含charset=UTF-8
+            String contentType = response.header("Content-Type", "");
+            log.debug("SSE响应Content-Type: {}", contentType);
+            if (!contentType.toLowerCase().contains("charset=utf-8")) {
+                log.warn("SSE响应未明确指定UTF-8编码，可能导致中文乱码: {}", contentType);
             }
             
             BufferedReader reader = new BufferedReader(

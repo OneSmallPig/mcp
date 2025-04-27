@@ -2,7 +2,7 @@ package org.yubang.util.mcpdemo.service;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 import com.google.gson.Gson;
@@ -34,10 +34,17 @@ public class SseEmitterService {
     private final Map<String, SseEmitter> emitters = new ConcurrentHashMap<>();
     
     // JSON序列化工具
-    private final Gson gson = new Gson();
+    private final Gson gson;
     
     // 心跳任务执行器
     private ScheduledExecutorService heartbeatExecutor;
+    
+    public SseEmitterService() {
+        // 初始化Gson实例，禁用HTML转义避免中文被转为Unicode
+        this.gson = new com.google.gson.GsonBuilder()
+            .disableHtmlEscaping()
+            .create();
+    }
     
     @PostConstruct
     public void init() {
@@ -147,11 +154,16 @@ public class SseEmitterService {
         }
         
         // 创建SSE事件对象
-        String jsonData = gson.toJson(data);
+        // 使用不转义HTML的Gson实例，避免中文被转义为Unicode
+        Gson noEscapingGson = new com.google.gson.GsonBuilder()
+            .disableHtmlEscaping()
+            .create();
+            
+        String jsonData = noEscapingGson.toJson(data);
         SseEmitter.SseEventBuilder event = SseEmitter.event()
             .id(String.valueOf(System.currentTimeMillis()))
             .name(eventName)
-            .data(jsonData);
+            .data(jsonData, MediaType.parseMediaType("application/json;charset=UTF-8"));
         
         // 发送事件
         try {
@@ -250,13 +262,5 @@ public class SseEmitterService {
                 failedClients.size(), emitters.size());
         }
     }
-    
-    /**
-     * 获取当前活跃连接数
-     * 
-     * @return 活跃连接数
-     */
-    public int getActiveConnectionCount() {
-        return emitters.size();
-    }
-} 
+
+}

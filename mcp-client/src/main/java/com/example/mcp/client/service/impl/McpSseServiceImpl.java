@@ -44,6 +44,12 @@ public class McpSseServiceImpl implements McpSseService {
     // 添加活跃请求标记
     private boolean activeRequest = false;
     
+    // 添加对话历史记录
+    private final List<JsonObject> messageHistory = new ArrayList<>();
+    
+    // 添加当前活跃的监听器引用
+    private SseEventListener currentListener;
+    
     public McpSseServiceImpl() {
         this.config = McpClientConfig.getInstance();
         this.clientId = UUID.randomUUID().toString();
@@ -111,7 +117,10 @@ public class McpSseServiceImpl implements McpSseService {
         // 创建请求
         Request request = new Request.Builder()
                 .url(url)
-                .header("Accept", "text/event-stream")
+                .header("Accept", "text/event-stream;charset=UTF-8")
+                .header("Accept-Charset", "UTF-8")
+                .header("Cache-Control", "no-cache")
+                .header("Connection", "keep-alive")
                 .build();
         
         // 创建SSE连接
@@ -162,6 +171,46 @@ public class McpSseServiceImpl implements McpSseService {
                             log.info("收到连接成功事件");
                         }
                         
+                        // 处理工具结果事件 - 初始连接也可能接收到工具调用结果
+                        if ("tool_result".equals(type)) {
+                            log.info("初始连接收到工具结果事件，转发处理: {}", data);
+                            try {
+                                // 尝试解析为JSON
+                                JsonObject toolResultData = gson.fromJson(data, JsonObject.class);
+                                
+                                String toolCallId = toolResultData.has("tool_call_id") ? 
+                                    toolResultData.get("tool_call_id").getAsString() : null;
+                                
+                                String result = "";
+                                if (toolResultData.has("result")) {
+                                    result = toolResultData.get("result").getAsString();
+                                    log.debug("处理后的工具结果: {}", result);
+                                }
+                                
+                                // 如果有当前活跃的监听器，通知它
+                                if (currentListener != null) {
+                                    // 通知监听器工具执行结果
+                                    if (toolResultData.has("function")) {
+                                        String functionName = toolResultData.get("function").getAsString();
+                                        currentListener.onToolResult(functionName, result);
+                                    } else {
+                                        currentListener.onToolResult("unknown_function", result);
+                                    }
+                                    
+                                    // 将工具执行结果直接发送给大模型
+                                    if (toolCallId != null && !toolCallId.isEmpty()) {
+                                        log.info("初始连接：将工具执行结果直接发送给大模型: {}", result);
+                                        sendToolResultToModel(toolCallId, result);
+                                    }
+                                } else {
+                                    log.warn("收到工具结果事件，但没有活跃的监听器处理");
+                                }
+                            } catch (Exception e) {
+                                log.error("处理初始连接接收到的工具结果事件时出错", e);
+                            }
+                            return;
+                        }
+                        
                         // 2. 尝试解析为JSON并检查客户端ID字段
                         try {
                             JsonObject jsonData = gson.fromJson(data, JsonObject.class);
@@ -187,7 +236,6 @@ public class McpSseServiceImpl implements McpSseService {
                                 String extractedId = parts[1].trim();
                                 log.info("从文本数据中获取客户端ID: {}", extractedId);
                                 clientId = extractedId;
-                                return;
                             }
                         }
                     }
@@ -286,6 +334,9 @@ public class McpSseServiceImpl implements McpSseService {
         // 标记有活跃请求
         setActiveRequest(true);
         
+        // 保存当前监听器引用
+        this.currentListener = listener;
+        
         // 如果连接已关闭或不存在，则创建新连接
         if (currentEventSource == null || currentEventSource.isClosed()) {
             log.info("连接不存在或已关闭，重新初始化SSE连接");
@@ -294,6 +345,9 @@ public class McpSseServiceImpl implements McpSseService {
         
         // 生成新的提示ID
         currentPromptId = UUID.randomUUID().toString();
+        
+        // 清空历史记录，准备新对话
+        messageHistory.clear();
         
         // 准备请求体
         JsonObject requestBody = new JsonObject();
@@ -308,6 +362,9 @@ public class McpSseServiceImpl implements McpSseService {
             msgObj.addProperty("role", message.getRole());
             msgObj.addProperty("content", message.getContent());
             messagesArray.add(msgObj);
+            
+            // 保存到历史记录
+            messageHistory.add(msgObj);
         }
         
         // 添加当前用户消息
@@ -315,6 +372,9 @@ public class McpSseServiceImpl implements McpSseService {
         userMessage.addProperty("role", "user");
         userMessage.addProperty("content", prompt);
         messagesArray.add(userMessage);
+        
+        // 保存到历史记录
+        messageHistory.add(userMessage);
         
         requestBody.add("messages", messagesArray);
         
@@ -389,16 +449,18 @@ public class McpSseServiceImpl implements McpSseService {
         
         public SseSourceListener(SseEventListener userListener) {
             this.userListener = userListener;
+            // 更新当前监听器引用
+            currentListener = userListener;
         }
         
-                    @Override
-                    public void onOpen(EventSource eventSource, Response response) {
+        @Override
+        public void onOpen(EventSource eventSource, Response response) {
             log.debug("SSE连接已打开: {}", response.code());
             // 通知连接已建立，但不触发任何输出
-                    }
-                    
-                    @Override
-                    public void onEvent(EventSource eventSource, String id, String type, String data) {
+        }
+        
+        @Override
+        public void onEvent(EventSource eventSource, String id, String type, String data) {
             if (completed) {
                 return; // 已经完成，不再处理事件
             }
@@ -427,27 +489,44 @@ public class McpSseServiceImpl implements McpSseService {
                     // 工具结果事件，服务端执行工具后返回结果
                     log.info("收到工具结果事件: {}", data);
                     
-                    String toolCallId = jsonData.has("tool_call_id") ? 
-                        jsonData.get("tool_call_id").getAsString() : null;
-                    
-                    String result = jsonData.has("result") ? 
-                        jsonData.get("result").getAsString() : "";
-                    
-                    // 查找对应的工具调用记录
-                    ToolCall matchedToolCall = null;
-                    
-                    // 根据工具调用ID查找匹配的工具调用
-                    // 简单实现：暂时以最后一个工具调用为准，实际应该通过ID精确匹配
-                    // TODO: 优化工具调用ID匹配逻辑
-                    
-                    // 通知监听器工具执行结果
-                    if (jsonData.has("function")) {
-                        // 如果包含function字段，直接使用
-                        String functionName = jsonData.get("function").getAsString();
-                        userListener.onToolResult(functionName, result);
-                    } else {
-                        // 否则使用通用名称
-                        userListener.onToolResult("unknown_function", result);
+                    try {
+                        // 尝试解析为JSON
+                        JsonObject toolResultData = gson.fromJson(data, JsonObject.class);
+                        
+                        String toolCallId = toolResultData.has("tool_call_id") ? 
+                            toolResultData.get("tool_call_id").getAsString() : null;
+                        
+                        String result = "";
+                        if (toolResultData.has("result")) {
+                            result = toolResultData.get("result").getAsString();
+                            log.debug("处理后的工具结果: {}", result);
+                        }
+
+                        
+                        // 通知监听器工具执行结果
+                        if (toolResultData.has("function")) {
+                            // 如果包含function字段，直接使用
+                            String functionName = toolResultData.get("function").getAsString();
+                            userListener.onToolResult(functionName, result);
+                        } else {
+                            // 否则使用通用名称
+                            userListener.onToolResult("unknown_function", result);
+                        }
+                        
+                        // 将工具执行结果直接发送给大模型
+                        try {
+                            if (toolCallId != null && !toolCallId.isEmpty()) {
+                                log.info("将工具执行结果直接发送给大模型: {}", result);
+                                // 创建一个工具调用响应消息
+                                sendToolResultToModel(toolCallId, result);
+                            } else {
+                                log.warn("无法将工具结果发送给大模型，缺少工具调用ID");
+                            }
+                        } catch (Exception e) {
+                            log.error("向大模型发送工具执行结果时出错", e);
+                        }
+                    } catch (Exception e) {
+                        log.error("解析工具结果事件数据时出错", e);
                     }
                     
                     return;
@@ -577,8 +656,8 @@ public class McpSseServiceImpl implements McpSseService {
                                 }
                             }
                         }
-            }
-        } catch (Exception e) {
+                    }
+                } catch (Exception e) {
                     log.error("合并工具调用事件时出错", e);
                 }
             }
@@ -591,7 +670,7 @@ public class McpSseServiceImpl implements McpSseService {
                 JsonObject mergedToolCall = entry.getValue();
                 
                 try {
-        ToolCall toolCall = new ToolCall();
+                    ToolCall toolCall = new ToolCall();
                     toolCall.setId(toolCallId);
                     
                     // 提取函数信息
@@ -752,7 +831,7 @@ public class McpSseServiceImpl implements McpSseService {
                                         targetFunction.add("arguments", sourceArgs);
                                     }
                                 }
-                    } else {
+                            } else {
                                 // 其他情况，优先使用非空的参数
                                 if ((sourceArgs.isJsonPrimitive() && !sourceArgs.getAsString().isEmpty()) ||
                                     (sourceArgs.isJsonObject() && sourceArgs.getAsJsonObject().size() > 0)) {
@@ -1073,5 +1152,185 @@ public class McpSseServiceImpl implements McpSseService {
         }
         
         return arguments;
+    }
+
+    /**
+     * 将工具执行结果直接发送给大模型
+     * 
+     * @param toolCallId 工具调用ID
+     * @param result 工具执行结果
+     */
+    private void sendToolResultToModel(String toolCallId, String result) {
+        try {
+            log.info("发送工具结果给大模型，工具ID: {}, 结果: {}", toolCallId, result);
+            
+            // 准备请求体
+            JsonObject requestBody = new JsonObject();
+            requestBody.addProperty("model", config.getModel());
+            
+            // 创建消息列表，包含完整历史
+            JsonArray messagesArray = new JsonArray();
+            
+            // 添加之前的消息历史
+            for (JsonObject historyMessage : messageHistory) {
+                messagesArray.add(historyMessage);
+            }
+            
+            // 添加新的工具结果消息
+            JsonObject toolResultMessage = new JsonObject();
+            toolResultMessage.addProperty("role", "tool");
+            toolResultMessage.addProperty("tool_call_id", toolCallId);
+            toolResultMessage.addProperty("content", result);
+            messagesArray.add(toolResultMessage);
+            
+            // 将工具结果消息添加到历史
+            messageHistory.add(toolResultMessage);
+            
+            requestBody.add("messages", messagesArray);
+            
+            // 设置流式输出
+            requestBody.addProperty("stream", true);
+            
+            // 添加工具列表
+            List<Tool> tools = config.getTools();
+            if (tools != null && !tools.isEmpty()) {
+                JsonArray toolsArray = new JsonArray();
+                for (Tool tool : tools) {
+                    JsonObject toolObj = new JsonObject();
+                    toolObj.addProperty("type", "function");
+                    
+                    JsonObject functionObj = new JsonObject();
+                    functionObj.addProperty("name", tool.getName());
+                    functionObj.addProperty("description", tool.getDescription());
+                    
+                    // 添加参数信息
+                    if (tool.getParameters() != null && !tool.getParameters().isEmpty()) {
+                        JsonObject parametersObj = gson.toJsonTree(tool.getParameters()).getAsJsonObject();
+                        functionObj.add("parameters", parametersObj);
+                    } else {
+                        // 如果没有参数，添加一个空对象作为参数
+                        JsonObject emptyParams = new JsonObject();
+                        emptyParams.addProperty("type", "object");
+                        emptyParams.add("properties", new JsonObject());
+                        functionObj.add("parameters", emptyParams);
+                    }
+                    
+                    toolObj.add("function", functionObj);
+                    toolsArray.add(toolObj);
+                }
+                
+                requestBody.add("tools", toolsArray);
+                requestBody.addProperty("tool_choice", "auto");
+            }
+            
+            // 发送请求
+            String url = config.getEndpoint();
+            
+            log.debug("发送工具结果到大模型: {}", url);
+            log.debug("请求体: {}", requestBody);
+            
+            // 准备请求
+            Request.Builder requestBuilder = new Request.Builder()
+                    .url(url)
+                    .post(RequestBody.create(requestBody.toString(), JSON));
+                    
+            // 添加火山引擎API密钥头信息
+            requestBuilder.header("Authorization", "Bearer " + config.getApiKey());
+            
+            // 创建SSE事件源来处理大模型的流式响应
+            EventSource.Factory factory = EventSources.createFactory(httpClient);
+            EventSource eventSource = factory.newEventSource(requestBuilder.build(), new ToolResultResponseListener(currentListener));
+            
+            // 注意：这个方法会立即返回，实际处理在ToolResultResponseListener中进行
+            log.debug("开始接收大模型对工具结果的响应");
+        } catch (Exception e) {
+            log.error("发送工具结果给大模型时发生错误", e);
+        }
+    }
+    
+    /**
+     * 处理大模型对工具调用结果的响应
+     */
+    private class ToolResultResponseListener extends EventSourceListener {
+        private final StringBuilder contentBuilder = new StringBuilder();
+        private final SseEventListener userListener;
+        
+        public ToolResultResponseListener(SseEventListener userListener) {
+            this.userListener = userListener;
+        }
+        
+        @Override
+        public void onOpen(EventSource eventSource, Response response) {
+            log.debug("工具调用结果响应连接已打开: {}", response.code());
+        }
+        
+        @Override
+        public void onEvent(EventSource eventSource, String id, String type, String data) {
+            if (data == null || data.trim().isEmpty() || "[DONE]".equals(data.trim())) {
+                log.debug("大模型对工具调用结果响应完成");
+                // 保存模型的响应到历史记录
+                if (contentBuilder.length() > 0) {
+                    JsonObject assistantResponse = new JsonObject();
+                    assistantResponse.addProperty("role", "assistant");
+                    assistantResponse.addProperty("content", contentBuilder.toString());
+                    messageHistory.add(assistantResponse);
+                }
+                return;
+            }
+            
+            try {
+                // 尝试解析数据为JSON
+                JsonObject jsonData = gson.fromJson(data, JsonObject.class);
+                
+                // 处理标准的OpenAI格式事件
+                if (jsonData.has("choices") && !jsonData.get("choices").isJsonNull()) {
+                    JsonObject choiceObj = jsonData.getAsJsonArray("choices")
+                            .get(0).getAsJsonObject();
+                    
+                    // 处理内容增量
+                    if (choiceObj.has("delta") && !choiceObj.get("delta").isJsonNull()) {
+                        JsonObject deltaObj = choiceObj.getAsJsonObject("delta");
+                        
+                        // 处理文本内容
+                        if (deltaObj.has("content") && !deltaObj.get("content").isJsonNull()) {
+                            String content = deltaObj.get("content").getAsString();
+                            contentBuilder.append(content);
+                            
+                            // 将内容发送给用户监听器
+                            if (userListener != null) {
+                                userListener.onTextChunk(content);
+                            } else {
+                                log.warn("工具调用响应无法发送给用户，监听器为null");
+                            }
+                            
+                            log.debug("大模型响应增量: {}", content);
+                        }
+                        
+                        // 检查是否有新的工具调用 - 递归情况
+                        if (deltaObj.has("tool_calls") && !deltaObj.get("tool_calls").isJsonNull()) {
+                            log.info("大模型在工具调用结果后继续产生新的工具调用");
+                            // 这里可以处理递归工具调用，但暂时略过实现
+                        }
+                    }
+                }
+            } catch (Exception e) {
+                log.error("解析工具调用响应数据时出错", e);
+            }
+        }
+        
+        @Override
+        public void onClosed(EventSource eventSource) {
+            log.debug("工具调用结果响应连接已关闭");
+        }
+        
+        @Override
+        public void onFailure(EventSource eventSource, Throwable t, Response response) {
+            log.error("工具调用结果响应连接失败", t);
+            
+            // 通知用户监听器错误
+            if (userListener != null) {
+                userListener.onError(t);
+            }
+        }
     }
 } 

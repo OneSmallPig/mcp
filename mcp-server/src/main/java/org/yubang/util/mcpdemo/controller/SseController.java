@@ -3,7 +3,6 @@ package org.yubang.util.mcpdemo.controller;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 import org.yubang.util.mcpdemo.service.SseEmitterService;
@@ -13,7 +12,7 @@ import java.io.IOException;
 import java.util.Map;
 import java.util.UUID;
 import java.util.HashMap;
-import com.google.gson.Gson;
+import jakarta.servlet.http.HttpServletResponse;
 
 /**
  * SSE控制器，用于处理MCP协议的SSE连接和事件
@@ -38,8 +37,14 @@ public class SseController {
      * 
      * @return SseEmitter对象
      */
-    @GetMapping(value = "/sse", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
-    public SseEmitter connect() {
+    @GetMapping(value = "/sse", produces = "text/event-stream;charset=UTF-8")
+    public SseEmitter connect(HttpServletResponse response) {
+        // 添加额外的响应头，确保使用UTF-8编码
+        response.setHeader("Content-Type", "text/event-stream;charset=UTF-8");
+        response.setHeader("Cache-Control", "no-cache");
+        response.setHeader("Connection", "keep-alive");
+        response.setCharacterEncoding("UTF-8");
+        
         String clientId = UUID.randomUUID().toString();
         log.info("建立新的SSE连接: {}", clientId);
         
