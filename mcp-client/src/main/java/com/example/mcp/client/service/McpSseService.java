@@ -26,16 +26,7 @@ public interface McpSseService {
      * @param listener 事件监听器
      */
     void sendPrompt(List<Message> history, String prompt, SseEventListener listener) throws IOException;
-    
-    /**
-     * 发送工具结果
-     * 
-     * @param promptId 提示ID
-     * @param toolCallId 工具调用ID
-     * @param result 工具执行结果
-     */
-    void sendToolResult(String promptId, String toolCallId, String result) throws IOException;
-    
+
     /**
      * 关闭连接
      */

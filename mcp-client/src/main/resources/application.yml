@@ -10,7 +10,7 @@ mcp:
         model: deepseek-r1-250120
       # 请求配置
       request:
-        timeout: 60
+        timeout: 43200
         retries: 3
     
     # MCP服务配置

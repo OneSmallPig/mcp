@@ -41,6 +41,9 @@ public class McpSseServiceImpl implements McpSseService {
     private String clientId;
     private String currentPromptId;
     
+    // 添加活跃请求标记
+    private boolean activeRequest = false;
+    
     public McpSseServiceImpl() {
         this.config = McpClientConfig.getInstance();
         this.clientId = UUID.randomUUID().toString();
@@ -81,8 +84,13 @@ public class McpSseServiceImpl implements McpSseService {
         
         // 关闭可能存在的连接
         if (currentEventSource != null) {
-            currentEventSource.cancel();
-            currentEventSource = null;
+            try {
+                currentEventSource.cancel();
+            } catch (Exception e) {
+                log.warn("关闭旧连接时出错", e);
+            } finally {
+                currentEventSource = null;
+            }
         }
         
         // 检查配置中是否设置了SSE服务器URL
@@ -109,72 +117,156 @@ public class McpSseServiceImpl implements McpSseService {
         // 创建SSE连接
         try {
             currentEventSource = EventSources.createFactory(httpClient)
-                    .newEventSource(request, new EventSourceListener() {
-                        @Override
-                        public void onOpen(EventSource eventSource, Response response) {
-                            log.info("初始SSE连接已打开");
+                .newEventSource(request, new EventSourceListener() {
+                    @Override
+                    public void onOpen(EventSource eventSource, Response response) {
+                        log.info("初始SSE连接已打开");
+                        
+                        // 检查响应码
+                        if (response.code() != 200) {
+                            log.warn("SSE连接返回非200状态码: {}", response.code());
                         }
                         
-                        @Override
-                        public void onEvent(EventSource eventSource, String id, String type, String data) {
-                            // 不仅记录，还要解析可能包含客户端ID的事件
-                            log.debug("初始连接收到SSE事件: type={}, id={}, data={}", type, id, data);
-                            
-                            // 尝试从不同的事件类型和数据格式中提取客户端ID
-                            
-                            // 1. 检查事件类型
-                            if ("client_id".equals(type) || "id".equals(type)) {
-                                log.info("从事件类型中获取客户端ID: {}", data);
-                                clientId = data;
-                                return;
-                            }
-                            
-                            // 2. 尝试解析为JSON并检查客户端ID字段
+                        // 设置一个定时器，如果在一定时间内没有收到客户端ID，就重新连接
+                        new Thread(() -> {
                             try {
-                                JsonObject jsonData = gson.fromJson(data, JsonObject.class);
+                                // 等待3秒看是否收到了客户端ID
+                                Thread.sleep(3000);
                                 
-                                // 检查各种可能的客户端ID字段名
-                                String[] possibleFields = {"client_id", "clientId", "id", "connection_id", "connectionId"};
-                                for (String field : possibleFields) {
-                                    if (jsonData.has(field) && !jsonData.get(field).isJsonNull()) {
-                                        String extractedId = jsonData.get(field).getAsString();
-                                        log.info("从JSON数据中获取客户端ID({}): {}", field, extractedId);
-                                        clientId = extractedId;
-                                        return;
-                                    }
+                                // 如果客户端ID仍然是默认的UUID，说明没有收到服务器分配的ID
+                                if (clientId != null && clientId.equals(UUID.randomUUID().toString())) {
+                                    log.warn("在连接打开后3秒内未收到有效的客户端ID，可能需要重新连接");
+                                    // TODO: 考虑是否需要在这里重新连接
                                 }
-                            } catch (Exception e) {
-                                // 如果不是JSON格式，忽略错误
+                            } catch (InterruptedException e) {
+                                Thread.currentThread().interrupt();
                             }
+                        }).start();
+                    }
+                    
+                    @Override
+                    public void onEvent(EventSource eventSource, String id, String type, String data) {
+                        // 不仅记录，还要解析可能包含客户端ID的事件
+                        log.debug("初始连接收到SSE事件: type={}, id={}, data={}", type, id, data);
+                        
+                        // 尝试从不同的事件类型和数据格式中提取客户端ID
+                        
+                        // 1. 检查事件类型
+                        if ("client_id".equals(type) || "id".equals(type)) {
+                            log.info("从事件类型中获取客户端ID: {}", data);
+                            clientId = data;
+                            return;
+                        }
+                        
+                        if ("connected".equals(type)) {
+                            log.info("收到连接成功事件");
+                        }
+                        
+                        // 2. 尝试解析为JSON并检查客户端ID字段
+                        try {
+                            JsonObject jsonData = gson.fromJson(data, JsonObject.class);
                             
-                            // 3. 检查格式如"client_id:xxxx"的纯文本数据
-                            if (data != null && data.contains("client_id:")) {
-                                String[] parts = data.split("client_id:");
-                                if (parts.length > 1) {
-                                    String extractedId = parts[1].trim();
-                                    log.info("从文本数据中获取客户端ID: {}", extractedId);
+                            // 检查各种可能的客户端ID字段名
+                            String[] possibleFields = {"client_id", "clientId", "id", "connection_id", "connectionId"};
+                            for (String field : possibleFields) {
+                                if (jsonData.has(field) && !jsonData.get(field).isJsonNull()) {
+                                    String extractedId = jsonData.get(field).getAsString();
+                                    log.info("从JSON数据中获取客户端ID({}): {}", field, extractedId);
                                     clientId = extractedId;
                                     return;
                                 }
                             }
+                        } catch (Exception e) {
+                            // 如果不是JSON格式，忽略错误
                         }
                         
-                        @Override
-                        public void onClosed(EventSource eventSource) {
-                            log.info("初始SSE连接已关闭");
+                        // 3. 检查格式如"client_id:xxxx"的纯文本数据
+                        if (data != null && data.contains("client_id:")) {
+                            String[] parts = data.split("client_id:");
+                            if (parts.length > 1) {
+                                String extractedId = parts[1].trim();
+                                log.info("从文本数据中获取客户端ID: {}", extractedId);
+                                clientId = extractedId;
+                                return;
+                            }
                         }
+                    }
+                    
+                    @Override
+                    public void onClosed(EventSource eventSource) {
+                        log.info("初始SSE连接已关闭");
                         
-                        @Override
-                        public void onFailure(EventSource eventSource, Throwable t, Response response) {
-                            log.error("初始SSE连接失败", t);
-                            // 连接失败时清除引用，以便下次重新尝试
-                            currentEventSource = null;
+                        // 如果是在活跃请求期间关闭的，尝试重新连接
+                        if (isActiveRequest()) {
+                            log.warn("在活跃请求期间连接关闭，尝试重新连接");
+                            // 给一点延迟避免立即重连造成服务器压力
+                            new Thread(() -> {
+                                try {
+                                    Thread.sleep(1000);
+                                    initSseConnection();
+                                } catch (InterruptedException e) {
+                                    Thread.currentThread().interrupt();
+                                }
+                            }).start();
                         }
-                    });
+                    }
+                    
+                    @Override
+                    public void onFailure(EventSource eventSource, Throwable t, Response response) {
+                        log.error("初始SSE连接失败", t);
+                        
+                        // 连接失败时清除引用，以便下次重新尝试
+                        currentEventSource = null;
+                        
+                        // 延迟重连，避免快速失败循环
+                        new Thread(() -> {
+                            try {
+                                log.info("等待3秒后重试连接...");
+                                Thread.sleep(3000);
+                                
+                                // 如果有活跃请求，才需要重连
+                                if (isActiveRequest()) {
+                                    log.info("有活跃请求，尝试重新连接");
+                                    initSseConnection();
+                                }
+                            } catch (InterruptedException e) {
+                                Thread.currentThread().interrupt();
+                            }
+                        }).start();
+                    }
+                });
         } catch (Exception e) {
             log.error("创建初始SSE连接失败", e);
             currentEventSource = null;
+            
+            // 如果在活跃请求期间连接失败，提供更详细的日志
+            if (isActiveRequest()) {
+                log.error("在活跃请求期间创建SSE连接失败，这可能导致工具调用无法正确发送到客户端");
+            }
         }
+    }
+    
+    /**
+     * 检查是否有活跃请求正在处理中
+     * @return 是否有活跃请求
+     */
+    private synchronized boolean isActiveRequest() {
+        return activeRequest;
+    }
+
+    /**
+     * 设置活跃请求状态
+     * @param active 请求状态
+     */
+    private synchronized void setActiveRequest(boolean active) {
+        this.activeRequest = active;
+    }
+
+    /**
+     * 标记请求已完成
+     */
+    private void markRequestComplete() {
+        setActiveRequest(false);
     }
     
     @Override
@@ -185,8 +277,20 @@ public class McpSseServiceImpl implements McpSseService {
     
     @Override
     public void sendPrompt(List<Message> history, String prompt, SseEventListener listener) throws IOException {
-        // 关闭任何已存在的EventSource连接
-        close();
+        // 检查是否有活跃的请求正在处理
+        if (isActiveRequest()) {
+            log.warn("有请求正在处理中，请等待当前请求完成");
+            throw new IOException("有请求正在处理中，请等待当前请求完成");
+        }
+        
+        // 标记有活跃请求
+        setActiveRequest(true);
+        
+        // 如果连接已关闭或不存在，则创建新连接
+        if (currentEventSource == null || currentEventSource.isClosed()) {
+            log.info("连接不存在或已关闭，重新初始化SSE连接");
+            initSseConnection();
+        }
         
         // 生成新的提示ID
         currentPromptId = UUID.randomUUID().toString();
@@ -271,23 +375,7 @@ public class McpSseServiceImpl implements McpSseService {
         EventSource.Factory factory = EventSources.createFactory(httpClient);
         currentEventSource = factory.newEventSource(requestBuilder.build(), new SseSourceListener(listener));
     }
-    
-    /**
-     * 获取完整的服务器路径URL
-     */
-    private String getFullServerPath() {
-        String baseUrl = config.getServerUrl();
-        String path = config.getServerPath();
-        
-        if (!baseUrl.endsWith("/") && !path.startsWith("/")) {
-            return baseUrl + "/" + path;
-        } else if (baseUrl.endsWith("/") && path.startsWith("/")) {
-            return baseUrl + path.substring(1);
-        } else {
-            return baseUrl + path;
-        }
-    }
-    
+
     /**
      * SSE事件监听器适配器
      */
@@ -303,14 +391,14 @@ public class McpSseServiceImpl implements McpSseService {
             this.userListener = userListener;
         }
         
-        @Override
-        public void onOpen(EventSource eventSource, Response response) {
+                    @Override
+                    public void onOpen(EventSource eventSource, Response response) {
             log.debug("SSE连接已打开: {}", response.code());
             // 通知连接已建立，但不触发任何输出
-        }
-        
-        @Override
-        public void onEvent(EventSource eventSource, String id, String type, String data) {
+                    }
+                    
+                    @Override
+                    public void onEvent(EventSource eventSource, String id, String type, String data) {
             if (completed) {
                 return; // 已经完成，不再处理事件
             }
@@ -324,9 +412,55 @@ public class McpSseServiceImpl implements McpSseService {
             }
             
             try {
-                // 解析数据
+                // 尝试解析数据为JSON
                 JsonObject jsonData = gson.fromJson(data, JsonObject.class);
                 
+                // 根据事件类型处理
+                if ("tool_status".equals(type)) {
+                    // 工具状态事件，通知客户端工具开始执行
+                    log.info("收到工具状态事件: {}", data);
+                    // 可以通知UI显示等待状态等，当前不做特殊处理
+                    return;
+                }
+                
+                if ("tool_result".equals(type)) {
+                    // 工具结果事件，服务端执行工具后返回结果
+                    log.info("收到工具结果事件: {}", data);
+                    
+                    String toolCallId = jsonData.has("tool_call_id") ? 
+                        jsonData.get("tool_call_id").getAsString() : null;
+                    
+                    String result = jsonData.has("result") ? 
+                        jsonData.get("result").getAsString() : "";
+                    
+                    // 查找对应的工具调用记录
+                    ToolCall matchedToolCall = null;
+                    
+                    // 根据工具调用ID查找匹配的工具调用
+                    // 简单实现：暂时以最后一个工具调用为准，实际应该通过ID精确匹配
+                    // TODO: 优化工具调用ID匹配逻辑
+                    
+                    // 通知监听器工具执行结果
+                    if (jsonData.has("function")) {
+                        // 如果包含function字段，直接使用
+                        String functionName = jsonData.get("function").getAsString();
+                        userListener.onToolResult(functionName, result);
+                    } else {
+                        // 否则使用通用名称
+                        userListener.onToolResult("unknown_function", result);
+                    }
+                    
+                    return;
+                }
+                
+                if ("tool_complete".equals(type)) {
+                    // 工具完成事件
+                    log.info("收到工具完成事件: {}", data);
+                    // 可以做一些清理工作
+                    return;
+                }
+                
+                // 处理标准的OpenAI格式事件
                 if (jsonData.has("choices") && !jsonData.get("choices").isJsonNull()) {
                     JsonObject choiceObj = jsonData.getAsJsonArray("choices")
                             .get(0).getAsJsonObject();
@@ -443,8 +577,8 @@ public class McpSseServiceImpl implements McpSseService {
                                 }
                             }
                         }
-                    }
-                } catch (Exception e) {
+            }
+        } catch (Exception e) {
                     log.error("合并工具调用事件时出错", e);
                 }
             }
@@ -457,7 +591,7 @@ public class McpSseServiceImpl implements McpSseService {
                 JsonObject mergedToolCall = entry.getValue();
                 
                 try {
-                    ToolCall toolCall = new ToolCall();
+        ToolCall toolCall = new ToolCall();
                     toolCall.setId(toolCallId);
                     
                     // 提取函数信息
@@ -519,18 +653,8 @@ public class McpSseServiceImpl implements McpSseService {
                             
                             // 通知监听器工具执行结果
                             userListener.onToolResult(toolCall.getFunction(), result);
-                            
-                            // 发送结果给服务器
-                            sendToolResult(currentPromptId, toolCall.getId(), result);
                         } catch (Exception e) {
                             log.error("执行工具时出错", e);
-                            // 发送错误结果
-                            try {
-                                sendToolResult(currentPromptId, toolCall.getId(), 
-                                       "执行工具时出错: " + e.getMessage());
-                            } catch (Exception ex) {
-                                log.error("发送工具执行错误结果时出错", ex);
-                            }
                         }
                     } else {
                         log.warn("工具调用缺少函数信息: {}", toolCallId);
@@ -628,21 +752,7 @@ public class McpSseServiceImpl implements McpSseService {
                                         targetFunction.add("arguments", sourceArgs);
                                     }
                                 }
-                            } else if (targetArgs.isJsonObject() && sourceArgs.isJsonPrimitive()) {
-                                // 目标是对象，源是字符串
-                                if (sourceArgs.getAsString().isEmpty()) {
-                                    // 保持目标对象不变
-                                } else {
-                                    // 尝试将源字符串解析为JSON对象
-                                    try {
-                                        JsonObject parsedSourceArgs = gson.fromJson(sourceArgs.getAsString(), JsonObject.class);
-                                        mergeJsonObjects(targetArgs.getAsJsonObject(), parsedSourceArgs);
-                                    } catch (Exception e) {
-                                        // 解析失败，忽略
-                                        log.debug("无法将源参数字符串解析为JSON对象: {}", sourceArgs.getAsString());
-                                    }
-                                }
-                            } else {
+                    } else {
                                 // 其他情况，优先使用非空的参数
                                 if ((sourceArgs.isJsonPrimitive() && !sourceArgs.getAsString().isEmpty()) ||
                                     (sourceArgs.isJsonObject() && sourceArgs.getAsJsonObject().size() > 0)) {
@@ -677,33 +787,35 @@ public class McpSseServiceImpl implements McpSseService {
          * 安全地触发一次完成事件
          */
         private synchronized void completeEvent() {
-            if (!completed) {
-                completed = true;
-                userListener.onComplete();
+            if (completed) {
+                return;
             }
+            
+            completed = true;
+            
+            // 如果内容为空，但有工具调用，可能需要等待工具结果
+            if (contentBuilder.length() == 0 && !eventCache.isEmpty()) {
+                log.info("无文本内容但有工具调用，等待工具执行完成");
+            }
+            
+            log.debug("完成事件处理");
+            
+            // 通知用户监听器完成
+            userListener.onComplete();
+            
+            // 标记请求已完成
+            markRequestComplete();
         }
         
         @Override
         public void onFailure(EventSource eventSource, Throwable t, Response response) {
-            String errorMsg;
-            if (response != null) {
-                errorMsg = "SSE连接失败，HTTP状态码: " + response.code();
-                log.error("{}，原因: {}", errorMsg, response.message());
-                
-                // 特殊处理401错误
-                if (response.code() == 401) {
-                    errorMsg = "API认证失败(401)。请检查火山引擎API密钥配置是否正确。";
-                    log.error("火山引擎API认证失败，请检查application.yml中的apiKey配置。");
-                }
-                
-                userListener.onError(new IOException(errorMsg));
-            } else {
-                log.error("SSE连接失败", t);
-                userListener.onError(t);
-            }
+            log.error("SSE连接失败: {}", t.getMessage());
             
-            // 失败也标记为完成，避免重复触发
-            completed = true;
+            // 通知用户监听器错误
+            userListener.onError(t);
+            
+            // 标记请求已完成
+            markRequestComplete();
         }
         
         @Override
@@ -714,40 +826,9 @@ public class McpSseServiceImpl implements McpSseService {
             if (!completed) {
                 completeEvent();
             }
-        }
-    }
-    
-    @Override
-    public void sendToolResult(String promptId, String toolCallId, String result) throws IOException {
-        if (config.isUseMcpProtocol()) {
-            // 使用MCP协议发送工具结果
-            String url = getFullServerPath() + "/tool-result";
             
-            JsonObject requestBody = new JsonObject();
-            requestBody.addProperty("id", promptId); // 提示ID
-            requestBody.addProperty("tool_call_id", toolCallId); // 工具调用ID
-            requestBody.addProperty("result", result); // 工具执行结果
-            
-            log.info("发送工具执行结果 (ID: {}): {}", toolCallId, result);
-            
-            Request request = new Request.Builder()
-                    .url(url)
-                    .post(RequestBody.create(requestBody.toString(), JSON))
-                    .header("Authorization", "Bearer " + config.getApiKey())
-                    .build();
-            
-            try (Response response = httpClient.newCall(request).execute()) {
-                if (!response.isSuccessful()) {
-                    log.error("发送工具结果失败，HTTP状态码: {}", response.code());
-                    throw new IOException("发送工具结果失败: " + response.code());
-                }
-                
-                log.debug("发送工具结果成功");
-            }
-        } else {
-            // 直接API调用模式下的工具结果处理
-            // 火山引擎可能不直接支持这种方式
-            log.warn("当前模式不支持直接发送工具结果，结果将被丢弃: {}", result);
+            // 确保标记请求已完成
+            markRequestComplete();
         }
     }
     
@@ -777,6 +858,22 @@ public class McpSseServiceImpl implements McpSseService {
      */
     private String executeToolViaServer(ToolCall toolCall) {
         log.info("通过服务器执行工具: {}", toolCall.getFunction());
+        
+        // 检查客户端 ID 是否有效
+        if (this.clientId == null || this.clientId.isEmpty() || this.clientId.equals(UUID.randomUUID().toString())) {
+            log.warn("客户端ID无效或未获取到服务器分配的ID，可能导致服务端无法找到对应连接");
+            // 尝试重新建立连接获取有效的客户端ID
+            if (currentEventSource == null || currentEventSource.isClosed()) {
+                log.info("尝试重新建立连接以获取有效的客户端ID");
+                initSseConnection();
+                // 给一点时间让服务器分配ID
+                try {
+                    Thread.sleep(500);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+        }
         
         // 尝试多种可能的API路径和格式
         List<String> possibleApis = new ArrayList<>();
@@ -813,8 +910,9 @@ public class McpSseServiceImpl implements McpSseService {
                     requestBody.addProperty("client_id", this.clientId);
                     log.debug("使用服务器分配的客户端ID: {}", this.clientId);
                 } else {
+                    // 如果没有有效的客户端ID，使用提示ID，并明确警告
                     requestBody.addProperty("client_id", this.currentPromptId);
-                    log.debug("未找到服务器分配的客户端ID，使用当前提示ID: {}", this.currentPromptId);
+                    log.warn("未找到服务器分配的客户端ID，使用当前提示ID: {}，这可能导致服务端无法找到连接", this.currentPromptId);
                 }
                 
                 log.debug("尝试工具执行API: {} 请求: {}", url, requestBody);
@@ -825,7 +923,7 @@ public class McpSseServiceImpl implements McpSseService {
                         .post(RequestBody.create(requestBody.toString(), JSON))
                         .header("Content-Type", "application/json")
                         .build();
-                
+        
                 // 发送请求
                 try (Response response = httpClient.newCall(request).execute()) {
                     if (response.isSuccessful()) {
@@ -857,7 +955,15 @@ public class McpSseServiceImpl implements McpSseService {
                             
                             // 检查错误信息
                             if (resultObj.has("error")) {
-                                String error = "工具执行错误: " + resultObj.get("error").getAsString();
+                                String errorMsg = resultObj.get("error").getAsString();
+                                // 检查是否是连接中断错误
+                                if (errorMsg.contains("连接已断开") || errorMsg.contains("连接状态异常")) {
+                                    log.error("服务器报告连接已断开，尝试重新建立连接");
+                                    // 尝试重新建立连接
+                                    initSseConnection();
+                                }
+                                
+                                String error = "工具执行错误: " + errorMsg;
                                 log.error(error);
                                 return error;
                             }
@@ -894,6 +1000,19 @@ public class McpSseServiceImpl implements McpSseService {
     public void close() {
         log.info("正在关闭MCP SSE服务...");
         
+        // 等待活跃请求完成
+        if (isActiveRequest()) {
+            log.info("等待活跃请求完成...");
+            try {
+                // 简单等待一段时间让请求完成
+                for (int i = 0; i < 30 && isActiveRequest(); i++) {
+                    Thread.sleep(100);
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
+        
         if (currentEventSource != null) {
             try {
                 // 先尝试优雅关闭
@@ -913,6 +1032,8 @@ public class McpSseServiceImpl implements McpSseService {
             }
         }
         
+        // 确保请求标记被重置
+        setActiveRequest(false);
         log.info("MCP SSE服务已关闭");
     }
     
