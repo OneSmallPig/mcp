@@ -127,8 +127,6 @@ public class McpSseServiceImpl implements McpSseService {
                 .newEventSource(request, new EventSourceListener() {
                     @Override
                     public void onOpen(EventSource eventSource, Response response) {
-                        log.info("初始SSE连接已打开");
-                        
                         // 检查响应码
                         if (response.code() != 200) {
                             log.warn("SSE连接返回非200状态码: {}", response.code());
@@ -163,13 +161,8 @@ public class McpSseServiceImpl implements McpSseService {
                             return;
                         }
                         
-                        if ("connected".equals(type)) {
-                            log.info("收到连接成功事件");
-                        }
-                        
                         // 处理工具结果事件 - 初始连接也可能接收到工具调用结果
                         if ("tool_result".equals(type)) {
-                            log.info("初始连接收到工具结果事件，转发处理: {}", data);
                             try {
                                 // 尝试解析为JSON
                                 JsonObject toolResultData = gson.fromJson(data, JsonObject.class);
@@ -195,7 +188,6 @@ public class McpSseServiceImpl implements McpSseService {
                                     
                                     // 将工具执行结果直接发送给大模型
                                     if (toolCallId != null && !toolCallId.isEmpty() && currentEventSource != null) {
-                                        log.info("初始连接：将工具执行结果直接发送给大模型: {}", result);
                                         // 需要检查是否有活跃会话，如果有，则使用该会话的监听器
                                         if (isActiveRequest() && currentListener instanceof SseSourceListener) {
                                             // 使用当前活跃会话的监听器
@@ -222,9 +214,7 @@ public class McpSseServiceImpl implements McpSseService {
                             String[] possibleFields = {"client_id", "clientId", "id", "connection_id", "connectionId"};
                             for (String field : possibleFields) {
                                 if (jsonData.has(field) && !jsonData.get(field).isJsonNull()) {
-                                    String extractedId = jsonData.get(field).getAsString();
-                                    log.info("从JSON数据中获取客户端ID({}): {}", field, extractedId);
-                                    clientId = extractedId;
+                                    clientId = jsonData.get(field).getAsString();
                                     return;
                                 }
                             }
@@ -387,8 +377,6 @@ public class McpSseServiceImpl implements McpSseService {
         // 添加工具列表
         List<Tool> tools = config.getTools();
         if (tools != null && !tools.isEmpty()) {
-            log.info("添加{}个工具到请求中", tools.size());
-            
             JsonArray toolsArray = new JsonArray();
             for (Tool tool : tools) {
                 JsonObject toolObj = new JsonObject();
@@ -579,9 +567,6 @@ public class McpSseServiceImpl implements McpSseService {
                 log.debug("没有缓存的工具调用事件需要处理");
                 return;
             }
-            
-            log.info("开始处理{}个缓存的工具调用事件", eventCache.size());
-            
             // 合并所有事件中的工具调用
             Map<String, JsonObject> mergedToolCalls = new HashMap<>();
             Map<Integer, String> indexToIdMap = new HashMap<>();
@@ -665,8 +650,6 @@ public class McpSseServiceImpl implements McpSseService {
                 }
             }
             
-            log.info("合并后有{}个不同的工具调用", mergedToolCalls.size());
-            
             // 第二步：处理合并后的工具调用
             for (Map.Entry<String, JsonObject> entry : mergedToolCalls.entrySet()) {
                 String toolCallId = entry.getKey();
@@ -722,9 +705,6 @@ public class McpSseServiceImpl implements McpSseService {
                             toolCall.setArguments(new HashMap<>());
                         }
                         
-                        log.info("处理合并后的工具调用: {}({})", toolCall.getFunction(), 
-                                 toolCall.getArguments() != null ? gson.toJson(toolCall.getArguments()) : "无参数");
-                        
                         // 通知监听器
                         userListener.onToolCall(toolCall);
                         
@@ -738,8 +718,6 @@ public class McpSseServiceImpl implements McpSseService {
                             
                             // 将工具执行结果发送给大模型 - 传递当前SseSourceListener实例确保使用相同的缓冲式应答收集器
                             if (toolCallId != null && !toolCallId.isEmpty()) {
-                                log.info("将工具执行结果通过当前会话发送给大模型: {}", result);
-                                
                                 // 使用当前的用户监听器来确保一致地响应处理
                                 McpSseServiceImpl.this.sendToolResultWithCurrentListener(toolCallId, result, this);
                             }
@@ -899,8 +877,6 @@ public class McpSseServiceImpl implements McpSseService {
         
         @Override
         public void onFailure(EventSource eventSource, Throwable t, Response response) {
-            log.error("SSE连接失败: {}", t.getMessage());
-            
             // 通知用户监听器错误
             userListener.onError(t);
             
@@ -929,8 +905,6 @@ public class McpSseServiceImpl implements McpSseService {
      * @return 工具执行结果
      */
     private String executeToolCall(ToolCall toolCall) {
-        log.info("开始执行工具: {}", toolCall.getFunction());
-        
         // 首先检查是否有对应的工具定义
         List<Tool> availableTools = config.getTools();
         boolean toolExists = false;
@@ -971,8 +945,6 @@ public class McpSseServiceImpl implements McpSseService {
      * @return 工具执行结果
      */
     private String executeToolViaServer(ToolCall toolCall) {
-        log.info("通过服务器执行工具: {}", toolCall.getFunction());
-        
         // 检查客户端 ID 是否有效
         if (this.clientId == null || this.clientId.isEmpty() || this.clientId.equals(UUID.randomUUID().toString())) {
             log.warn("客户端ID无效或未获取到服务器分配的ID，可能导致服务端无法找到对应连接");
@@ -1198,8 +1170,6 @@ public class McpSseServiceImpl implements McpSseService {
      */
     private void sendToolResultToModel(String toolCallId, String result, boolean streamOutput) {
         try {
-            log.info("发送工具结果给大模型，工具ID: {}, 结果: {}", toolCallId, result);
-            
             // 准备请求体
             JsonObject requestBody = new JsonObject();
             requestBody.addProperty("model", config.getModel());
@@ -1296,8 +1266,6 @@ public class McpSseServiceImpl implements McpSseService {
      */
     private void sendToolResultWithCurrentListener(String toolCallId, String result, SseSourceListener currentListener) {
         try {
-            log.info("使用当前会话发送工具结果给大模型，工具ID: {}, 结果: {}", toolCallId, result);
-            
             // 准备请求体
             JsonObject requestBody = new JsonObject();
             requestBody.addProperty("model", config.getModel());

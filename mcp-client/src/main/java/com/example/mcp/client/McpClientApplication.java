@@ -130,11 +130,12 @@ public class McpClientApplication {
         messages.add(new Message("system", 
             "你是一个帮助助手。请严格遵循以下指示：" + toolPrompt));
         
+        // 初始提示，只显示一次
+        System.out.print("\nUser: ");
+        
         while (true) {
             StringBuilder inputBuilder = new StringBuilder();
             boolean isMultiLine = false;
-            
-            System.out.print("\nUser: ");
             
             // 读取第一行
             String line = scanner.nextLine().trim();
@@ -157,6 +158,7 @@ public class McpClientApplication {
                 if (!line.isEmpty() && !line.equals(END_MARKER)) {
                     if (line.equals(CANCEL_MARKER)) {
                         System.out.println("已取消当前输入。");
+                        System.out.print("\nUser: ");
                         continue;
                     }
                     
@@ -170,6 +172,7 @@ public class McpClientApplication {
                         if (line.equals(CANCEL_MARKER)) {
                             inputBuilder.setLength(0); // 清空输入
                             System.out.println("已取消当前输入。");
+                            System.out.print("\nUser: ");
                             break;
                         }
                         
@@ -208,20 +211,23 @@ public class McpClientApplication {
             messages.add(new Message("user", input));
             
             try {
+                // 使用同步方式等待响应完成
+                java.util.concurrent.CountDownLatch completionLatch = new java.util.concurrent.CountDownLatch(1);
+                
                 // 创建缓冲式应答收集器
                 BufferedSseEventListener bufferedListener = new BufferedSseEventListener() {
                     private final List<ToolCall> currentToolCalls = new ArrayList<>();
                     
                     @Override
                     public void onToolCall(ToolCall toolCall) {
-                        System.out.println("\n[工具调用] " + toolCall.getFunction());
-                        System.out.println("参数: " + gson.toJson(toolCall.getArguments()));
+//                        System.out.println("\n[工具调用] " + toolCall.getFunction());
+//                        System.out.println("参数: " + gson.toJson(toolCall.getArguments()));
                         currentToolCalls.add(toolCall);
                     }
                     
                     @Override
                     public void onToolResult(String function, String result) {
-                        System.out.println("[工具结果] " + function + ": " + result);
+//                        System.out.println("[工具结果] " + function + ": " + result);
                     }
                     
                     @Override
@@ -239,20 +245,46 @@ public class McpClientApplication {
                             assistantMessage.setToolCalls(currentToolCalls);
                             messages.add(assistantMessage);
                         }
+                        
+                        // 响应完成，显示下一个输入提示
+                        System.out.print("\nUser: ");
+                        
+                        // 释放等待锁，表示已完成响应
+                        completionLatch.countDown();
                     }
                     
                     @Override
                     public void onError(Throwable t) {
                         System.err.println("\n错误: " + t.getMessage());
+                        
+                        // 即使出错也显示下一个输入提示
+                        System.out.print("\nUser: ");
+                        
+                        // 释放等待锁
+                        completionLatch.countDown();
                     }
                 };
                 
                 // 发送请求
                 mcpSseService.sendPrompt(messages, input, bufferedListener);
                 
+                // 等待响应完成（异步变同步）
+                try {
+                    // 等待最多5分钟
+                    completionLatch.await(5, java.util.concurrent.TimeUnit.MINUTES);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    System.err.println("等待响应时被中断");
+                }
+                
+                // 不再需要在此处打印User: 提示，因为onComplete或onError中已经处理了
+                
             } catch (IOException e) {
                 System.err.println("发送请求失败: " + e.getMessage());
                 log.error("发送请求失败", e);
+                
+                // 出错时也显示下一个输入提示
+                System.out.print("\nUser: ");
             }
         }
         

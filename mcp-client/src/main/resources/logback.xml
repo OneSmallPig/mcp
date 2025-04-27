@@ -1,8 +1,18 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <configuration>
     <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <filter class="ch.qos.logback.core.filter.EvaluatorFilter">
+            <evaluator class="ch.qos.logback.classic.boolex.OnMarkerEvaluator">
+                <matcher>
+                    <name>IGNORE_CONSOLE</name>
+                    <regex>.*工具执行.*|.*初始连接.*|.*SSE连接.*|.*发送请求体.*|.*收到SSE事件.*</regex>
+                </matcher>
+            </evaluator>
+            <OnMismatch>NEUTRAL</OnMismatch>
+            <OnMatch>DENY</OnMatch>
+        </filter>
         <encoder>
-            <pattern>%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n</pattern>
+            <pattern>%d{HH:mm:ss} %-5level %logger{20} - %msg%n</pattern>
         </encoder>
     </appender>
     
@@ -18,6 +28,14 @@
             <pattern>%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n</pattern>
         </encoder>
     </appender>
+    
+    <logger name="com.example.mcp.client.service.impl.McpServiceImpl" level="WARN"/>
+    
+    <logger name="com.example.mcp.client.sse" level="INFO"/>
+    <logger name="com.example.mcp.client.service.impl" level="INFO"/>
+    
+    <logger name="okhttp3" level="WARN"/>
+    <logger name="org.apache.http" level="WARN"/>
     
     <logger name="com.example.mcp" level="DEBUG"/>
     

@@ -3,11 +3,11 @@ mcp:
     # 火山引擎API配置
     volcano:
       # API密钥信息
-      apiKey: af65b0b7-e01d-4fd3-8a64-04db65f2b730
+      apiKey: 55ff613b-04fa-4e11-a149-ddf5a12013c9
       # 服务接口配置
       deepseek:
         endpoint: https://ark.cn-beijing.volces.com/api/v3/chat/completions
-        model: deepseek-r1-250120
+        model: deepseek-v3-250324
       # 请求配置
       request:
         timeout: 43200
