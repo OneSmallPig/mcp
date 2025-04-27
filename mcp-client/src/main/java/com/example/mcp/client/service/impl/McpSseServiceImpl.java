@@ -72,8 +72,6 @@ public class McpSseServiceImpl implements McpSseService {
         this.gson = new Gson();
         
         log.info("MCP SSE服务初始化完成");
-        log.info("SSE服务器URL: {}", config.getSseServerUrl());
-        log.info("SSE客户端ID: {}", clientId);
         
         // 初始化时建立SSE连接
         initSseConnection();
@@ -145,7 +143,6 @@ public class McpSseServiceImpl implements McpSseService {
                                 // 如果客户端ID仍然是默认的UUID，说明没有收到服务器分配的ID
                                 if (clientId != null && clientId.equals(UUID.randomUUID().toString())) {
                                     log.warn("在连接打开后3秒内未收到有效的客户端ID，可能需要重新连接");
-                                    // TODO: 考虑是否需要在这里重新连接
                                 }
                             } catch (InterruptedException e) {
                                 Thread.currentThread().interrupt();
@@ -159,7 +156,6 @@ public class McpSseServiceImpl implements McpSseService {
                         log.debug("初始连接收到SSE事件: type={}, id={}, data={}", type, id, data);
                         
                         // 尝试从不同的事件类型和数据格式中提取客户端ID
-                        
                         // 1. 检查事件类型
                         if ("client_id".equals(type) || "id".equals(type)) {
                             log.info("从事件类型中获取客户端ID: {}", data);
@@ -198,9 +194,16 @@ public class McpSseServiceImpl implements McpSseService {
                                     }
                                     
                                     // 将工具执行结果直接发送给大模型
-                                    if (toolCallId != null && !toolCallId.isEmpty()) {
+                                    if (toolCallId != null && !toolCallId.isEmpty() && currentEventSource != null) {
                                         log.info("初始连接：将工具执行结果直接发送给大模型: {}", result);
-                                        sendToolResultToModel(toolCallId, result);
+                                        // 需要检查是否有活跃会话，如果有，则使用该会话的监听器
+                                        if (isActiveRequest() && currentListener instanceof SseSourceListener) {
+                                            // 使用当前活跃会话的监听器
+                                            sendToolResultWithCurrentListener(toolCallId, result, (SseSourceListener)currentListener);
+                                        } else {
+                                            // 没有活跃会话，创建一个新的请求
+                                            sendToolResultToModel(toolCallId, result, false);
+                                        }
                                     }
                                 } else {
                                     log.warn("收到工具结果事件，但没有活跃的监听器处理");
@@ -517,8 +520,8 @@ public class McpSseServiceImpl implements McpSseService {
                         try {
                             if (toolCallId != null && !toolCallId.isEmpty()) {
                                 log.info("将工具执行结果直接发送给大模型: {}", result);
-                                // 创建一个工具调用响应消息
-                                sendToolResultToModel(toolCallId, result);
+                                // 使用当前会话发送工具结果
+                                McpSseServiceImpl.this.sendToolResultWithCurrentListener(toolCallId, result, this);
                             } else {
                                 log.warn("无法将工具结果发送给大模型，缺少工具调用ID");
                             }
@@ -732,6 +735,14 @@ public class McpSseServiceImpl implements McpSseService {
                             
                             // 通知监听器工具执行结果
                             userListener.onToolResult(toolCall.getFunction(), result);
+                            
+                            // 将工具执行结果发送给大模型 - 传递当前SseSourceListener实例确保使用相同的缓冲式应答收集器
+                            if (toolCallId != null && !toolCallId.isEmpty()) {
+                                log.info("将工具执行结果通过当前会话发送给大模型: {}", result);
+                                
+                                // 使用当前的用户监听器来确保一致地响应处理
+                                McpSseServiceImpl.this.sendToolResultWithCurrentListener(toolCallId, result, this);
+                            }
                         } catch (Exception e) {
                             log.error("执行工具时出错", e);
                         }
@@ -919,6 +930,30 @@ public class McpSseServiceImpl implements McpSseService {
      */
     private String executeToolCall(ToolCall toolCall) {
         log.info("开始执行工具: {}", toolCall.getFunction());
+        
+        // 首先检查是否有对应的工具定义
+        List<Tool> availableTools = config.getTools();
+        boolean toolExists = false;
+        
+        // 记录所有可用的工具名称
+        StringBuilder availableToolNames = new StringBuilder();
+        for (Tool tool : availableTools) {
+            if (availableToolNames.length() > 0) {
+                availableToolNames.append(", ");
+            }
+            availableToolNames.append(tool.getName());
+            
+            if (tool.getName().equals(toolCall.getFunction())) {
+                toolExists = true;
+            }
+        }
+        
+        if (!toolExists) {
+            String errorMsg = "工具 " + toolCall.getFunction() + " 不存在或未配置。可用工具: " + 
+                              (availableToolNames.length() > 0 ? availableToolNames.toString() : "无");
+            log.warn(errorMsg);
+            return errorMsg;
+        }
         
         // 如果是使用MCP协议，应该将工具调用请求发送给MCP服务器
         if (config.isUseMcpProtocol() || config.isUseLocalServer()) {
@@ -1159,8 +1194,9 @@ public class McpSseServiceImpl implements McpSseService {
      * 
      * @param toolCallId 工具调用ID
      * @param result 工具执行结果
+     * @param streamOutput 是否使用流式输出
      */
-    private void sendToolResultToModel(String toolCallId, String result) {
+    private void sendToolResultToModel(String toolCallId, String result, boolean streamOutput) {
         try {
             log.info("发送工具结果给大模型，工具ID: {}, 结果: {}", toolCallId, result);
             
@@ -1237,100 +1273,112 @@ public class McpSseServiceImpl implements McpSseService {
             // 添加火山引擎API密钥头信息
             requestBuilder.header("Authorization", "Bearer " + config.getApiKey());
             
-            // 创建SSE事件源来处理大模型的流式响应
+            // 使用与普通交互相同的事件监听器，确保一致的用户体验
             EventSource.Factory factory = EventSources.createFactory(httpClient);
-            EventSource eventSource = factory.newEventSource(requestBuilder.build(), new ToolResultResponseListener(currentListener));
+            EventSource eventSource = factory.newEventSource(
+                requestBuilder.build(), 
+                new SseSourceListener(currentListener)
+            );
             
-            // 注意：这个方法会立即返回，实际处理在ToolResultResponseListener中进行
             log.debug("开始接收大模型对工具结果的响应");
         } catch (Exception e) {
             log.error("发送工具结果给大模型时发生错误", e);
         }
     }
-    
+
     /**
-     * 处理大模型对工具调用结果的响应
+     * 使用当前正在进行的对话会话发送工具执行结果给大模型
+     * 这确保了工具结果处理使用与用户提问相同的监听器，保持一致的响应体验
+     * 
+     * @param toolCallId 工具调用ID
+     * @param result 工具执行结果
+     * @param currentListener 当前会话的监听器
      */
-    private class ToolResultResponseListener extends EventSourceListener {
-        private final StringBuilder contentBuilder = new StringBuilder();
-        private final SseEventListener userListener;
-        
-        public ToolResultResponseListener(SseEventListener userListener) {
-            this.userListener = userListener;
-        }
-        
-        @Override
-        public void onOpen(EventSource eventSource, Response response) {
-            log.debug("工具调用结果响应连接已打开: {}", response.code());
-        }
-        
-        @Override
-        public void onEvent(EventSource eventSource, String id, String type, String data) {
-            if (data == null || data.trim().isEmpty() || "[DONE]".equals(data.trim())) {
-                log.debug("大模型对工具调用结果响应完成");
-                // 保存模型的响应到历史记录
-                if (contentBuilder.length() > 0) {
-                    JsonObject assistantResponse = new JsonObject();
-                    assistantResponse.addProperty("role", "assistant");
-                    assistantResponse.addProperty("content", contentBuilder.toString());
-                    messageHistory.add(assistantResponse);
-                }
-                return;
+    private void sendToolResultWithCurrentListener(String toolCallId, String result, SseSourceListener currentListener) {
+        try {
+            log.info("使用当前会话发送工具结果给大模型，工具ID: {}, 结果: {}", toolCallId, result);
+            
+            // 准备请求体
+            JsonObject requestBody = new JsonObject();
+            requestBody.addProperty("model", config.getModel());
+            
+            // 创建消息列表，包含完整历史
+            JsonArray messagesArray = new JsonArray();
+            
+            // 添加之前的消息历史
+            for (JsonObject historyMessage : messageHistory) {
+                messagesArray.add(historyMessage);
             }
             
-            try {
-                // 尝试解析数据为JSON
-                JsonObject jsonData = gson.fromJson(data, JsonObject.class);
-                
-                // 处理标准的OpenAI格式事件
-                if (jsonData.has("choices") && !jsonData.get("choices").isJsonNull()) {
-                    JsonObject choiceObj = jsonData.getAsJsonArray("choices")
-                            .get(0).getAsJsonObject();
+            // 添加新的工具结果消息
+            JsonObject toolResultMessage = new JsonObject();
+            toolResultMessage.addProperty("role", "tool");
+            toolResultMessage.addProperty("tool_call_id", toolCallId);
+            toolResultMessage.addProperty("content", result);
+            messagesArray.add(toolResultMessage);
+            
+            // 将工具结果消息添加到历史
+            messageHistory.add(toolResultMessage);
+            
+            requestBody.add("messages", messagesArray);
+            
+            // 设置流式输出
+            requestBody.addProperty("stream", true);
+            
+            // 添加工具列表
+            List<Tool> tools = config.getTools();
+            if (tools != null && !tools.isEmpty()) {
+                JsonArray toolsArray = new JsonArray();
+                for (Tool tool : tools) {
+                    JsonObject toolObj = new JsonObject();
+                    toolObj.addProperty("type", "function");
                     
-                    // 处理内容增量
-                    if (choiceObj.has("delta") && !choiceObj.get("delta").isJsonNull()) {
-                        JsonObject deltaObj = choiceObj.getAsJsonObject("delta");
-                        
-                        // 处理文本内容
-                        if (deltaObj.has("content") && !deltaObj.get("content").isJsonNull()) {
-                            String content = deltaObj.get("content").getAsString();
-                            contentBuilder.append(content);
-                            
-                            // 将内容发送给用户监听器
-                            if (userListener != null) {
-                                userListener.onTextChunk(content);
-                            } else {
-                                log.warn("工具调用响应无法发送给用户，监听器为null");
-                            }
-                            
-                            log.debug("大模型响应增量: {}", content);
-                        }
-                        
-                        // 检查是否有新的工具调用 - 递归情况
-                        if (deltaObj.has("tool_calls") && !deltaObj.get("tool_calls").isJsonNull()) {
-                            log.info("大模型在工具调用结果后继续产生新的工具调用");
-                            // 这里可以处理递归工具调用，但暂时略过实现
-                        }
+                    JsonObject functionObj = new JsonObject();
+                    functionObj.addProperty("name", tool.getName());
+                    functionObj.addProperty("description", tool.getDescription());
+                    
+                    // 添加参数信息
+                    if (tool.getParameters() != null && !tool.getParameters().isEmpty()) {
+                        JsonObject parametersObj = gson.toJsonTree(tool.getParameters()).getAsJsonObject();
+                        functionObj.add("parameters", parametersObj);
+                    } else {
+                        // 如果没有参数，添加一个空对象作为参数
+                        JsonObject emptyParams = new JsonObject();
+                        emptyParams.addProperty("type", "object");
+                        emptyParams.add("properties", new JsonObject());
+                        functionObj.add("parameters", emptyParams);
                     }
+                    
+                    toolObj.add("function", functionObj);
+                    toolsArray.add(toolObj);
                 }
-            } catch (Exception e) {
-                log.error("解析工具调用响应数据时出错", e);
+                
+                requestBody.add("tools", toolsArray);
+                requestBody.addProperty("tool_choice", "auto");
             }
-        }
-        
-        @Override
-        public void onClosed(EventSource eventSource) {
-            log.debug("工具调用结果响应连接已关闭");
-        }
-        
-        @Override
-        public void onFailure(EventSource eventSource, Throwable t, Response response) {
-            log.error("工具调用结果响应连接失败", t);
             
-            // 通知用户监听器错误
-            if (userListener != null) {
-                userListener.onError(t);
-            }
+            // 发送请求
+            String url = config.getEndpoint();
+            
+            log.debug("发送工具结果到大模型: {}", url);
+            log.debug("请求体: {}", requestBody);
+            
+            // 准备请求
+            Request.Builder requestBuilder = new Request.Builder()
+                    .url(url)
+                    .post(RequestBody.create(requestBody.toString(), JSON));
+                    
+            // 添加火山引擎API密钥头信息
+            requestBuilder.header("Authorization", "Bearer " + config.getApiKey());
+            
+            // 创建SSE事件源来处理大模型的流式响应，使用传入的当前监听器
+            // 这样所有的响应都会通过同一个监听器处理，保持一致的响应体验
+            EventSource.Factory factory = EventSources.createFactory(httpClient);
+            EventSource eventSource = factory.newEventSource(requestBuilder.build(), currentListener);
+            
+            log.debug("开始通过当前会话接收大模型对工具结果的响应");
+        } catch (Exception e) {
+            log.error("通过当前会话发送工具结果给大模型时发生错误", e);
         }
     }
 } 

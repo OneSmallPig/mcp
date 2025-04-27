@@ -91,13 +91,6 @@ public final class EventSources {
                 return;
             }
             
-            // 检查响应头中的Content-Type是否包含charset=UTF-8
-            String contentType = response.header("Content-Type", "");
-            log.debug("SSE响应Content-Type: {}", contentType);
-            if (!contentType.toLowerCase().contains("charset=utf-8")) {
-                log.warn("SSE响应未明确指定UTF-8编码，可能导致中文乱码: {}", contentType);
-            }
-            
             BufferedReader reader = new BufferedReader(
                     new InputStreamReader(response.body().byteStream(), StandardCharsets.UTF_8));
             

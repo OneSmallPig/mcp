@@ -1,14 +1,10 @@
 package com.example.mcp.client;
 
 import com.example.mcp.client.config.McpClientConfig;
-import com.example.mcp.client.model.ChatRequest;
-import com.example.mcp.client.model.ChatResponse;
 import com.example.mcp.client.model.Message;
 import com.example.mcp.client.model.Tool;
 import com.example.mcp.client.model.ToolCall;
-import com.example.mcp.client.service.McpService;
 import com.example.mcp.client.service.McpSseService;
-import com.example.mcp.client.service.SimpleSseEventListener;
 import com.example.mcp.client.service.BufferedSseEventListener;
 import com.example.mcp.client.service.impl.McpServiceImpl;
 import com.example.mcp.client.service.impl.McpSseServiceImpl;
@@ -61,19 +57,10 @@ public class McpClientApplication {
         }
         
         if (args.length > 0) {
-            if (args[0].equals("--interactive")) {
-                // 交互模式 - 使用标准MCP服务，会自动启动本地服务器
-                runInteractiveMode(new McpServiceImpl());
-            } else if (args[0].equals("--sse")) {
+            if (args[0].equals("--sse")) {
                 // SSE交互模式 - 需要先确保本地服务器已启动
                 runSseInteractiveMode(new McpSseServiceImpl());
-            } else if (args[0].equals("--simple")) {
-                // 简化SSE模式 - 也需要确保本地服务器已启动
-                runSimpleMode();
             }
-        } else {
-            // 演示模式 - 使用标准MCP服务，会自动启动本地服务器
-            runDemoMode(new McpServiceImpl());
         }
     }
     
@@ -87,21 +74,8 @@ public class McpClientApplication {
                 log.info("正在启动本地MCP服务器...");
 
                 // 创建临时的McpService实例来启动本地服务器
-                McpService tempService = new McpServiceImpl();
-                
-                // 发送一个简单请求以触发服务器启动
-                ChatRequest request = new ChatRequest();
-                List<Message> messages = new ArrayList<>();
-                messages.add(new Message("system", "test"));
-                request.setMessages(messages);
-                
-                try {
-                    tempService.sendChatRequest(request);
-                    log.info("本地MCP服务器已成功启动");
-                } catch (Exception e) {
-                    log.warn("测试请求失败，但本地服务器可能已启动: {}", e.getMessage());
-                }
-                
+                new McpServiceImpl();
+
                 // 等待服务器完全启动
                 try {
                     Thread.sleep(2000);
@@ -117,79 +91,6 @@ public class McpClientApplication {
     }
     
     /**
-     * 运行交互模式
-     * 
-     * @param mcpService MCP服务
-     */
-    private static void runInteractiveMode(McpService mcpService) {
-        Scanner scanner = new Scanner(System.in);
-        List<Message> messages = new ArrayList<>();
-        
-        System.out.println("欢迎使用MCP客户端！输入'exit'退出。");
-        
-        // 添加系统提示
-        messages.add(new Message("system", "You are a helpful assistant. When user requests a tool function, always try to call the available tools to satisfy their request."));
-        
-        while (true) {
-            System.out.print("\nUser: ");
-            String input = scanner.nextLine().trim();
-            
-            if ("exit".equalsIgnoreCase(input)) {
-                break;
-            }
-            
-            // 添加用户消息
-            messages.add(new Message("user", input));
-            
-            try {
-                // 创建请求
-                ChatRequest request = new ChatRequest();
-                request.setMessages(new ArrayList<>(messages));
-                
-                // 发送请求
-                ChatResponse response = mcpService.sendChatRequest(request);
-                
-                // 处理响应
-                if (response.getChoices() != null && !response.getChoices().isEmpty()) {
-                    ChatResponse.Choice choice = response.getChoices().get(0);
-                    Message assistantMessage = choice.getMessage();
-                    String content = assistantMessage.getContent();
-                    
-                    System.out.println("\nAssistant: " + (content != null ? content : "(使用工具中...)"));
-                    
-                    // 显示工具调用
-                    if (choice.getToolCalls() != null && !choice.getToolCalls().isEmpty()) {
-                        System.out.println("\n[工具调用]:");
-                        for (ToolCall toolCall : choice.getToolCalls()) {
-                            System.out.println("  - 工具: " + toolCall.getFunction());
-                            System.out.println("    参数: " + gson.toJson(toolCall.getArguments()));
-                            if (toolCall.getResult() != null) {
-                                System.out.println("    结果: " + toolCall.getResult());
-                            }
-                        }
-                    }
-                    
-                    // 添加助手消息到历史
-                    messages.add(assistantMessage);
-                    
-                    // 显示Token使用情况
-                    if (response.getUsage() != null) {
-                        System.out.println("\n[Token使用: 提示词 " + response.getUsage().getPromptTokens() + 
-                                ", 完成 " + response.getUsage().getCompletionTokens() + 
-                                ", 总计 " + response.getUsage().getTotalTokens() + "]");
-                    }
-                }
-            } catch (IOException e) {
-                System.err.println("发送请求失败: " + e.getMessage());
-                log.error("发送请求失败", e);
-            }
-        }
-        
-        System.out.println("感谢使用MCP客户端，再见！");
-        scanner.close();
-    }
-    
-    /**
      * 运行SSE交互模式
      * 
      * @param mcpSseService MCP SSE服务
@@ -202,12 +103,32 @@ public class McpClientApplication {
         
         System.out.println("欢迎使用MCP客户端SSE模式！");
         System.out.println("- 输入'" + END_MARKER + "'结束多行输入并发送消息");
+        System.out.println("- 输入词语后跟'" + END_MARKER + "'(例如：'你好/end')可以直接发送");
         System.out.println("- 输入'" + CANCEL_MARKER + "'取消当前输入");
         System.out.println("- 输入'exit'退出程序");
         System.out.println("你可以直接输入单行文本，或使用回车输入多行文本，以'" + END_MARKER + "'结束。");
         
+        // 获取可用工具信息
+        List<Tool> availableTools = McpClientConfig.getInstance().getTools();
+        StringBuilder toolPrompt = new StringBuilder();
+        if (!availableTools.isEmpty()) {
+            toolPrompt.append("系统仅有以下工具可用，没有其他工具：\n");
+            for (Tool tool : availableTools) {
+                toolPrompt.append("- ").append(tool.getName()).append(": ").append(tool.getDescription()).append("\n");
+            }
+            toolPrompt.append("\n严格遵守以下规则：\n");
+            toolPrompt.append("1. 只有当用户明确要求的功能与上述工具的具体用途完全匹配时，才调用相应工具。\n");
+            toolPrompt.append("2. 如果用户询问的内容（如天气、新闻等）没有对应的专门工具，直接使用你的知识以纯文本方式回答，不要提及任何工具或API。\n");
+            toolPrompt.append("3. 不要建议使用API接口、数据库查询或任何工具作为替代方案，也不要提示用户提供API配置、数据库连接等信息。\n");
+            toolPrompt.append("4. 对于没有工具支持的功能（如天气查询），请直接回答问题本身，就像一个没有工具能力的助手一样，完全不要提及工具话题。\n");
+            toolPrompt.append("5. 不要以任何形式暗示用户可以通过提供配置信息来使用现有工具实现其他功能。\n");
+        } else {
+            toolPrompt.append("当前系统没有配置任何工具。请仅提供文本回复，不要提及或尝试调用任何工具。");
+        }
+        
         // 添加系统提示
-        messages.add(new Message("system", "You are a helpful assistant. When user requests a tool function, always try to call the available tools to satisfy their request."));
+        messages.add(new Message("system", 
+            "你是一个帮助助手。请严格遵循以下指示：" + toolPrompt));
         
         while (true) {
             StringBuilder inputBuilder = new StringBuilder();
@@ -223,34 +144,50 @@ public class McpClientApplication {
                 break;
             }
             
-            // 普通单行模式
-            inputBuilder.append(line);
-            
-            // 如果第一行不为空且不包含结束标记，启用多行模式
-            if (!line.isEmpty() && !line.equals(END_MARKER)) {
-                if (line.equals(CANCEL_MARKER)) {
-                    System.out.println("已取消当前输入。");
-                    continue;
-                }
+            // 检查行尾是否有结束标记
+            if (line.endsWith(END_MARKER) && !line.equals(END_MARKER)) {
+                // 移除结束标记，保留实际内容
+                String content = line.substring(0, line.length() - END_MARKER.length());
+                inputBuilder.append(content);
+            } else {
+                // 普通单行模式
+                inputBuilder.append(line);
                 
-                // 检查输入结束标记
-                while (!line.equals(END_MARKER)) {
-                    // 等待下一行输入
-                    System.out.print("> ");
-                    line = scanner.nextLine().trim();
-                    
-                    // 如果输入取消标记，取消整个输入
+                // 如果第一行不为空且不包含结束标记，启用多行模式
+                if (!line.isEmpty() && !line.equals(END_MARKER)) {
                     if (line.equals(CANCEL_MARKER)) {
-                        inputBuilder.setLength(0); // 清空输入
                         System.out.println("已取消当前输入。");
-                        break;
+                        continue;
                     }
                     
-                    // 如果不是结束标记，添加到输入中
-                    if (!line.equals(END_MARKER)) {
-                        // 添加换行符和当前行
-                        inputBuilder.append("\n").append(line);
-                        isMultiLine = true;
+                    // 检查输入结束标记
+                    while (!line.equals(END_MARKER)) {
+                        // 等待下一行输入
+                        System.out.print("> ");
+                        line = scanner.nextLine().trim();
+                        
+                        // 如果输入取消标记，取消整个输入
+                        if (line.equals(CANCEL_MARKER)) {
+                            inputBuilder.setLength(0); // 清空输入
+                            System.out.println("已取消当前输入。");
+                            break;
+                        }
+                        
+                        // 检查行尾是否有结束标记
+                        if (line.endsWith(END_MARKER) && !line.equals(END_MARKER)) {
+                            // 移除结束标记，保留实际内容
+                            String content = line.substring(0, line.length() - END_MARKER.length());
+                            inputBuilder.append("\n").append(content);
+                            isMultiLine = true;
+                            break;
+                        }
+                        
+                        // 如果不是结束标记，添加到输入中
+                        if (!line.equals(END_MARKER)) {
+                            // 添加换行符和当前行
+                            inputBuilder.append("\n").append(line);
+                            isMultiLine = true;
+                        }
                     }
                 }
             }
@@ -323,182 +260,5 @@ public class McpClientApplication {
         System.out.println("感谢使用MCP客户端，再见！");
         scanner.close();
     }
-    
-    /**
-     * 运行简化模式
-     * 使用更简单的API演示MCP工具调用
-     */
-    private static void runSimpleMode() {
-        System.out.println("启动简化MCP客户端模式...");
-        
-        Scanner scanner = new Scanner(System.in);
-        SimpleMcpClient client = new SimpleMcpClient();
-        final String END_MARKER = "/end";
-        final String CANCEL_MARKER = "/cancel";
-        
-        System.out.println("欢迎使用MCP简化客户端！");
-        System.out.println("- 输入'" + END_MARKER + "'结束多行输入并发送消息");
-        System.out.println("- 输入'" + CANCEL_MARKER + "'取消当前输入");
-        System.out.println("- 输入'exit'退出程序");
-        
-        while (true) {
-            StringBuilder inputBuilder = new StringBuilder();
-            boolean isMultiLine = false;
-            
-            System.out.print("\nUser: ");
-            
-            // 读取第一行
-            String line = scanner.nextLine().trim();
-            
-            // 检查是否退出
-            if ("exit".equalsIgnoreCase(line)) {
-                break;
-            }
-            
-            // 普通单行模式
-            inputBuilder.append(line);
-            
-            // 如果第一行不为空且不包含结束标记，启用多行模式
-            if (!line.isEmpty() && !line.equals(END_MARKER)) {
-                if (line.equals(CANCEL_MARKER)) {
-                    System.out.println("已取消当前输入。");
-                    continue;
-                }
-                
-                // 检查输入结束标记
-                while (!line.equals(END_MARKER)) {
-                    // 等待下一行输入
-                    System.out.print("> ");
-                    line = scanner.nextLine().trim();
-                    
-                    // 如果输入取消标记，取消整个输入
-                    if (line.equals(CANCEL_MARKER)) {
-                        inputBuilder.setLength(0); // 清空输入
-                        System.out.println("已取消当前输入。");
-                        break;
-                    }
-                    
-                    // 如果不是结束标记，添加到输入中
-                    if (!line.equals(END_MARKER)) {
-                        // 添加换行符和当前行
-                        inputBuilder.append("\n").append(line);
-                        isMultiLine = true;
-                    }
-                }
-            }
-            
-            // 如果输入被取消，继续下一轮
-            if (inputBuilder.length() == 0) {
-                continue;
-            }
-            
-            final String input = inputBuilder.toString();
-            
-            // 显示实际处理的输入（多行模式下）
-            if (isMultiLine) {
-                System.out.println("\n处理多行输入：\n---\n" + input + "\n---");
-            }
-            
-            try {
-                client.chat(input, new SimpleMcpClient.ChatCallback() {
-                    @Override
-                    public void onAiResponse(String text) {
-                        System.out.print(text);
-                    }
-                    
-                    @Override
-                    public void onToolUse(String toolName, String parameters) {
-                        System.out.println("\n\n[使用工具] " + toolName);
-                        System.out.println("参数: " + parameters);
-                    }
-                    
-                    @Override
-                    public void onToolResult(String toolName, String result) {
-                        System.out.println("[工具结果] " + toolName + ": " + result);
-                    }
-                    
-                    @Override
-                    public void onFinished() {
-                        System.out.println("\n");
-                    }
-                    
-                    @Override
-                    public void onError(String errorMessage) {
-                        System.err.println("\n错误: " + errorMessage);
-                    }
-                });
-            } catch (Exception e) {
-                System.err.println("请求失败: " + e.getMessage());
-            }
-        }
-        
-        client.close();
-        System.out.println("感谢使用MCP简化客户端，再见！");
-        scanner.close();
-    }
-    
-    /**
-     * 运行演示模式
-     * 
-     * @param mcpService MCP服务
-     */
-    private static void runDemoMode(McpService mcpService) {
-        try {
-            log.info("运行演示模式");
-            
-            // 创建聊天历史
-            List<Message> messages = new ArrayList<>();
-            messages.add(new Message("system", "You are a helpful assistant. When user requests a tool function, always try to call the available tools to satisfy their request."));
-            
-            // 如果有工具，演示工具调用
-            if (!McpClientConfig.getInstance().getTools().isEmpty()) {
-                messages.add(new Message("user", "请帮我查询一下北京的天气。"));
-            } else {
-                messages.add(new Message("user", "你好，请介绍一下自己。"));
-            }
-            
-            // 创建请求
-            ChatRequest request = new ChatRequest();
-            request.setMessages(messages);
-            
-            log.info("发送示例请求...");
-            
-            // 发送请求
-            ChatResponse response = mcpService.sendChatRequest(request);
-            
-            // 处理响应
-            if (response.getChoices() != null && !response.getChoices().isEmpty()) {
-                ChatResponse.Choice choice = response.getChoices().get(0);
-                Message assistantMessage = choice.getMessage();
-                
-                log.info("收到响应: {}", assistantMessage.getContent());
-                System.out.println("\nAssistant: " + assistantMessage.getContent());
-                
-                // 显示工具调用
-                if (choice.getToolCalls() != null && !choice.getToolCalls().isEmpty()) {
-                    log.info("工具调用: {}", gson.toJson(choice.getToolCalls()));
-                    System.out.println("\n[工具调用]:");
-                    for (ToolCall toolCall : choice.getToolCalls()) {
-                        System.out.println("  - 工具: " + toolCall.getFunction());
-                        System.out.println("    参数: " + gson.toJson(toolCall.getArguments()));
-                        if (toolCall.getResult() != null) {
-                            System.out.println("    结果: " + toolCall.getResult());
-                        }
-                    }
-                }
-                
-                // 显示Token使用情况
-                if (response.getUsage() != null) {
-                    log.info("Token使用: 提示词 {}, 完成 {}, 总计 {}", 
-                            response.getUsage().getPromptTokens(),
-                            response.getUsage().getCompletionTokens(),
-                            response.getUsage().getTotalTokens());
-                }
-            }
-            
-            log.info("演示完成");
-        } catch (IOException e) {
-            log.error("演示运行失败", e);
-        }
-    }
+
 } 
