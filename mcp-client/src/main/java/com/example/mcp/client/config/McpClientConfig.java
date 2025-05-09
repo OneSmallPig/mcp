@@ -42,6 +42,9 @@ public class McpClientConfig {
     private String sseServerPath;
     private boolean useSse = false;
     
+    // 自定义配置文件路径
+    private static String customConfigPath;
+    
     private List<Tool> tools = new ArrayList<>();
     
     private static McpClientConfig instance;
@@ -55,6 +58,28 @@ public class McpClientConfig {
             instance = new McpClientConfig();
         }
         return instance;
+    }
+    
+    /**
+     * 设置自定义配置文件路径
+     * @param configPath 配置文件的完整路径
+     * @return true如果文件存在且有效，否则返回false
+     */
+    public static boolean setCustomConfigPath(String configPath) {
+        File file = new File(configPath);
+        if (file.exists() && file.isFile()) {
+            customConfigPath = configPath;
+            
+            // 如果已经创建了实例，则重新加载配置
+            if (instance != null) {
+                instance.loadConfig();
+            }
+            
+            return true;
+        } else {
+            log.error("指定的配置文件不存在或不是有效文件: {}", configPath);
+            return false;
+        }
     }
     
     @SuppressWarnings("unchecked")
@@ -138,119 +163,130 @@ public class McpClientConfig {
     }
     
     private void loadExternalConfig() {
+        // 如果设置了自定义配置文件路径，优先使用
+        if (customConfigPath != null && !customConfigPath.isEmpty()) {
+            loadConfigFromFile(new File(customConfigPath));
+            return; // 加载自定义配置后不再尝试其他位置
+        }
+        
         // 尝试加载外部配置文件位置
         String[] possibleLocations = {
-                ResourceUtil.getResource("").getPath() + "/mcp.json",  // 当前目录
+//                ResourceUtil.getResource("").getPath() + "/mcp.json",  // 当前目录
+                System.getProperty("user.dir") + "/mcp.json",  // 运行时目录
+                getJarDirectory() + "/mcp.json"  // Jar所在目录
         };
         
         for (String location : possibleLocations) {
             File configFile = new File(location);
             if (configFile.exists() && configFile.isFile()) {
-                try {
-                    log.info("发现外部配置文件: {}", location);
-                    String content = new String(Files.readAllBytes(Paths.get(location)));
-                    Gson gson = new Gson();
-                    JsonObject config = gson.fromJson(content, JsonObject.class);
-                    
-                    // 检查是否有MCP服务器配置
-                    if (config.has("mcp-servers")) {
-                        JsonObject serverConfig = config.getAsJsonObject("mcp-servers");
+                loadConfigFromFile(configFile);
+                break; // 找到一个有效的配置文件后不再继续查找
+            }
+        }
+    }
+    
+    /**
+     * 从文件加载配置
+     * @param configFile 配置文件
+     */
+    private void loadConfigFromFile(File configFile) {
+        try {
+            log.info("加载配置文件: {}", configFile.getAbsolutePath());
+            String content = new String(Files.readAllBytes(Paths.get(configFile.getAbsolutePath())));
+            Gson gson = new Gson();
+            JsonObject config = gson.fromJson(content, JsonObject.class);
+            
+            // 检查是否有MCP服务器配置
+            if (config.has("mcp-servers")) {
+                JsonObject serverConfig = config.getAsJsonObject("mcp-servers");
 
-                        //判断mcp服务名称
-                        for (String key : serverConfig.keySet()) {
-                            if (serverConfig.get(key).isJsonObject()) {
-                                JsonObject subConfig = serverConfig.getAsJsonObject(key);
-                                if (subConfig.has("command")) {
-                                    this.serverCommand = subConfig.get("command").getAsString();
-                                    this.useLocalServer = true;
+                //判断mcp服务名称
+                for (String key : serverConfig.keySet()) {
+                    if (serverConfig.get(key).isJsonObject()) {
+                        JsonObject subConfig = serverConfig.getAsJsonObject(key);
+                        if (subConfig.has("command")) {
+                            this.serverCommand = subConfig.get("command").getAsString();
+                            this.useLocalServer = true;
 
-                                    if (subConfig.has("args") && subConfig.get("args").isJsonArray()) {
-                                        this.serverArgs = gson.fromJson(subConfig.get("args"), String[].class);
-                                    }
-
-                                    // 判断是否为jar类型的服务器
-                                    if (this.serverCommand.equals("java")) {
-//                                        for (String serverArg : serverArgs) {
-//                                            this.serverCommand += " " + serverArg;
-//                                        }
-                                        this.serverType = "jar";
-                                        log.info("检测到jar类型的MCP服务器");
-                                    } else {
-                                        this.serverType = "http";
-                                    }
-
-                                    log.info("加载到本地MCP服务器配置，命令: {}, 类型: {}", serverCommand, this.serverType);
-                                }
+                            if (subConfig.has("args") && subConfig.get("args").isJsonArray()) {
+                                this.serverArgs = gson.fromJson(subConfig.get("args"), String[].class);
                             }
-                        }
-                    }
-                    
-                    // 检查是否有API密钥配置
-                    if (config.has("apiKey")) {
-                        this.apiKey = config.get("apiKey").getAsString();
-                        log.info("从外部配置加载API密钥");
-                    }
-                    
-                    // 检查是否有服务器URL配置
-                    if (config.has("server") && config.getAsJsonObject("server").has("url")) {
-                        this.serverUrl = config.getAsJsonObject("server").get("url").getAsString();
-                        
-                        if (config.getAsJsonObject("server").has("path")) {
-                            this.serverPath = config.getAsJsonObject("server").get("path").getAsString();
-                        }
-                        
-                        // 检查是否配置了使用MCP协议
-                        JsonObject serverObj = config.getAsJsonObject("server");
-                        if (serverObj.has("useMcpProtocol")) {
-                            this.useMcpProtocol = serverObj.get("useMcpProtocol").getAsBoolean();
-                            log.info("从外部配置设置MCP协议: {}", this.useMcpProtocol);
-                        }
-                        
-                        // 如果没有设置服务器类型，默认为http
-                        if (this.serverType == null) {
-                            this.serverType = "http";
-                        }
-                        
-                        log.info("从外部配置加载服务器URL: {}", serverUrl);
-                    }
-                    
-                    // 检查是否有SSE配置
-                    if (config.has("sse")) {
-                        JsonObject sseObj = config.getAsJsonObject("sse");
-                        if (sseObj.has("serverUrl")) {
-                            this.sseServerUrl = sseObj.get("serverUrl").getAsString();
-                            log.info("从外部配置加载SSE服务器URL: {}", this.sseServerUrl);
-                        }
-                        if (sseObj.has("serverPath")) {
-                            this.sseServerPath = sseObj.get("serverPath").getAsString();
-                            log.info("从外部配置加载SSE服务器路径: {}", this.sseServerPath);
-                        }
-                        if (sseObj.has("useSse")) {
-                            this.useSse = sseObj.get("useSse").getAsBoolean();
-                            log.info("从外部配置加载SSE使用设置: {}", this.useSse);
-                        }
-                    }
-                    
-                    // 加载工具配置
-                    if (config.has("tools") && config.get("tools").isJsonArray()) {
-                        JsonArray toolsArray = config.getAsJsonArray("tools");
-                        Type toolListType = new TypeToken<List<Tool>>(){}.getType();
-                        List<Tool> loadedTools = gson.fromJson(toolsArray, toolListType);
-                        if (loadedTools != null && !loadedTools.isEmpty()) {
-                            this.tools.addAll(loadedTools);
-                            log.info("从外部配置加载了 {} 个工具", loadedTools.size());
-                            for (Tool tool : loadedTools) {
-                                log.info("工具: {} - {}", tool.getName(), tool.getDescription());
+
+                            // 判断是否为jar类型的服务器
+                            if (this.serverCommand.equals("java")) {
+                                this.serverType = "jar";
+                                log.info("检测到jar类型的MCP服务器");
+                            } else {
+                                this.serverType = "http";
                             }
+
+                            log.info("加载到本地MCP服务器配置，命令: {}, 类型: {}", serverCommand, this.serverType);
                         }
                     }
-                    
-                    // 找到一个有效的配置文件后不再继续查找
-                    break;
-                } catch (Exception e) {
-                    log.error("加载外部配置文件 {} 失败: {}", location, e.getMessage());
                 }
             }
+            
+            // 检查是否有API密钥配置
+            if (config.has("apiKey")) {
+                this.apiKey = config.get("apiKey").getAsString();
+                log.info("从配置文件加载API密钥");
+            }
+            
+            // 检查是否有服务器URL配置
+            if (config.has("server") && config.getAsJsonObject("server").has("url")) {
+                this.serverUrl = config.getAsJsonObject("server").get("url").getAsString();
+                
+                if (config.getAsJsonObject("server").has("path")) {
+                    this.serverPath = config.getAsJsonObject("server").get("path").getAsString();
+                }
+                
+                // 检查是否配置了使用MCP协议
+                JsonObject serverObj = config.getAsJsonObject("server");
+                if (serverObj.has("useMcpProtocol")) {
+                    this.useMcpProtocol = serverObj.get("useMcpProtocol").getAsBoolean();
+                    log.info("从配置文件设置MCP协议: {}", this.useMcpProtocol);
+                }
+                
+                // 如果没有设置服务器类型，默认为http
+                if (this.serverType == null) {
+                    this.serverType = "http";
+                }
+                
+                log.info("从配置文件加载服务器URL: {}", serverUrl);
+            }
+            
+            // 检查是否有SSE配置
+            if (config.has("sse")) {
+                JsonObject sseObj = config.getAsJsonObject("sse");
+                if (sseObj.has("serverUrl")) {
+                    this.sseServerUrl = sseObj.get("serverUrl").getAsString();
+                    log.info("从配置文件加载SSE服务器URL: {}", this.sseServerUrl);
+                }
+                if (sseObj.has("serverPath")) {
+                    this.sseServerPath = sseObj.get("serverPath").getAsString();
+                    log.info("从配置文件加载SSE服务器路径: {}", this.sseServerPath);
+                }
+                if (sseObj.has("useSse")) {
+                    this.useSse = sseObj.get("useSse").getAsBoolean();
+                    log.info("从配置文件加载SSE使用设置: {}", this.useSse);
+                }
+            }
+            
+            // 加载工具配置
+            if (config.has("tools") && config.get("tools").isJsonArray()) {
+                JsonArray toolsArray = config.getAsJsonArray("tools");
+                Type toolListType = new TypeToken<List<Tool>>(){}.getType();
+                List<Tool> loadedTools = gson.fromJson(toolsArray, toolListType);
+                if (loadedTools != null && !loadedTools.isEmpty()) {
+                    this.tools.addAll(loadedTools);
+                    log.info("从配置文件加载了 {} 个工具", loadedTools.size());
+                    for (Tool tool : loadedTools) {
+                        log.info("工具: {} - {}", tool.getName(), tool.getDescription());
+                    }
+                }
+            }
+        } catch (Exception e) {
+            log.error("加载配置文件失败: " + configFile.getAbsolutePath(), e);
         }
     }
     
@@ -484,5 +520,22 @@ public class McpClientConfig {
     
     public void setTemperature(double temperature) {
         this.temperature = temperature;
+    }
+
+    private String getJarDirectory() {
+        try {
+            String path = McpClientConfig.class.getProtectionDomain().getCodeSource().getLocation().getPath();
+            // 处理URL编码的路径
+            path = java.net.URLDecoder.decode(path, "UTF-8");
+            // 如果是jar文件，获取其所在目录
+            if (path.endsWith(".jar")) {
+                path = path.substring(0, path.lastIndexOf("/"));
+            }
+            log.info("获取到Jar文件所在目录: {}", path);
+            return path;
+        } catch (Exception e) {
+            log.error("获取Jar文件所在目录失败", e);
+            return System.getProperty("user.dir"); // 默认返回当前工作目录
+        }
     }
 } 

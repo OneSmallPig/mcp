@@ -227,7 +227,7 @@ public class McpClientApplication {
                     
                     @Override
                     public void onToolResult(String function, String result) {
-//                        System.out.println("[工具结果] " + function + ": " + result);
+                        System.out.println("[工具结果] " + function + ": " + result);
                     }
                     
                     @Override
